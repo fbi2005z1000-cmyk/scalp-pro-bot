@@ -1,1 +1,0 @@
-# scalp-pro-bot
