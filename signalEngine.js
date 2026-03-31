@@ -35,6 +35,9 @@ class SignalEngine {
       'WEAK_TREND_STRENGTH',
       'BOLLINGER_SQUEEZE',
       'MACD_CONFLICT',
+      'MICRO_1M_NOT_CONFIRMED',
+      'LOW_MARKET_QUALITY',
+      'LOW_MARKET_QUALITY_CONTEXT',
       'STRICT_QUALITY_GATE',
     ]);
     return hardCodes.has(code);
@@ -407,10 +410,14 @@ class SignalEngine {
       });
     }
 
+    const source1m = candles1m && candles1m.length ? candles1m : candles2m;
+    const ind1m = IndicatorService.calculate(source1m);
     const ind2m = IndicatorService.calculate(candles2m);
     const ind5m = IndicatorService.calculate(candles5m);
     const ind15m = IndicatorService.calculate(candles15);
+    const candleInsight1m = CandleAnalyzer.analyze(source1m);
     const candleInsight = CandleAnalyzer.analyze(candles2m);
+    const structure1m = detectPriceStructure(source1m, 8);
     const structure2m = detectPriceStructure(candles2m, 8);
     const structure5m = detectPriceStructure(candles5m, 8);
 
@@ -467,6 +474,15 @@ class SignalEngine {
 
     const currentSession = this.detectSession();
     const sessionAllowed = this.isSessionAllowed(currentSession);
+    const marketQuality = this.assessMarketQuality({
+      trendResult,
+      trend15mResult,
+      sidewayResult,
+      ind2m,
+      ind5m,
+      ind15m,
+      spreadPct,
+    });
 
     const marketContext = {
       trend: trendResult.trend,
@@ -487,6 +503,7 @@ class SignalEngine {
       ma2m: ind2m.latest,
       ma5m: ind5m.latest,
       ma15m: ind15m.latest,
+      ma1m: ind1m.latest,
       adx2m: ind2m.latest.adx,
       plusDI2m: ind2m.latest.plusDI,
       minusDI2m: ind2m.latest.minusDI,
@@ -501,6 +518,7 @@ class SignalEngine {
       nearStrongSupport,
       supportResistance,
       priceAction,
+      marketQuality,
       lastPrice: latest2.close,
       analysisTimeframe: analysisTf,
     };
@@ -522,15 +540,29 @@ class SignalEngine {
       });
     }
 
+    if ((marketQuality?.score || 0) < Number(this.config.trading.marketQualityMinScore || 52)) {
+      return this.noTrade(symbol, 'Chất lượng thị trường thấp, đứng ngoài để tránh lệnh rác', {
+        code: 'LOW_MARKET_QUALITY',
+        market: marketContext,
+        diagnostics: {
+          marketQuality,
+          threshold: Number(this.config.trading.marketQualityMinScore || 52),
+        },
+      });
+    }
+
     const sharedInput = {
       latest2,
       prev2,
       candles2m,
+      ind1m,
       ind2m,
       ind5m,
       ind15m,
+      candleInsight1m,
       trendResult,
       trend15mResult,
+      structure1m,
       candleInsight,
       structure2m,
       structure5m,
@@ -543,6 +575,7 @@ class SignalEngine {
       keyLevels,
       supportResistance,
       priceAction,
+      marketQuality,
     };
 
     const longEval = this.evaluateLong(sharedInput);
@@ -562,7 +595,7 @@ class SignalEngine {
     if (trendResult.trend === 'UP') selected = longEval;
     if (trendResult.trend === 'DOWN') selected = shortEval;
 
-    const requiredScore = this.computeRequiredScore(volatilityRegime, sessionAllowed);
+    const requiredScore = this.computeRequiredScore(volatilityRegime, sessionAllowed, marketQuality?.score || 0);
 
     if (selected.hardBlocked) {
       return this.noTrade(
@@ -741,7 +774,63 @@ class SignalEngine {
     return 'NORMAL_VOL';
   }
 
-  computeRequiredScore(volatilityRegime, sessionAllowed) {
+  assessMarketQuality({ trendResult, trend15mResult, sidewayResult, ind2m, ind5m, ind15m, spreadPct }) {
+    const reasons = [];
+    let score = 70;
+
+    if (trendResult?.trend === 'SIDEWAY' || sidewayResult?.sideway) {
+      score -= 22;
+      reasons.push('Market sideway/range mạnh');
+    }
+
+    const adx2m = Number(ind2m?.latest?.adx || 0);
+    const adx5m = Number(ind5m?.latest?.adx || 0);
+    const adx15m = Number(ind15m?.latest?.adx || 0);
+
+    if (adx2m >= 20) score += 5;
+    else score -= 6;
+    if (adx5m >= 18) score += 4;
+    else score -= 5;
+    if (adx15m >= 16) score += 3;
+    else score -= 4;
+
+    const bb2m = Number(ind2m?.latest?.bbBandwidth || 0);
+    const bb5m = Number(ind5m?.latest?.bbBandwidth || 0);
+    if (bb2m <= this.config.trading.bbSqueezeMax) {
+      score -= 7;
+      reasons.push('Bollinger 2m squeeze');
+    }
+    if (bb5m <= this.config.trading.bbSqueezeMax * 1.1) {
+      score -= 5;
+      reasons.push('Bollinger 5m squeeze');
+    }
+
+    const volRatio = Number(ind2m?.volumeStatus?.ratio || 0);
+    if (volRatio >= 1.05) score += 4;
+    else if (volRatio < 0.85) {
+      score -= 8;
+      reasons.push('Volume thấp');
+    }
+
+    if (Number(spreadPct || 0) > this.config.trading.maxSpreadPct * 0.8) {
+      score -= 7;
+      reasons.push('Spread cao so với ngưỡng');
+    }
+
+    if (trendResult?.trend !== 'SIDEWAY' && trend15mResult?.trend !== 'SIDEWAY' && trendResult?.trend === trend15mResult?.trend) {
+      score += 4;
+    } else if (trend15mResult?.trend !== 'SIDEWAY' && trendResult?.trend !== trend15mResult?.trend) {
+      score -= 6;
+      reasons.push('Trend 5m/15m lệch nhau');
+    }
+
+    return {
+      score: clamp(Math.round(score), 0, 100),
+      reasons,
+    };
+  }
+
+  computeRequiredScore(volatilityRegime, sessionAllowed, marketQualityScore = 100) {
     let threshold = this.config.trading.signalThreshold;
 
     if (this.config.advanced.dynamicThresholdByVolatility) {
@@ -751,6 +840,12 @@ class SignalEngine {
 
     if (this.config.advanced.sessionFilterEnabled && !sessionAllowed) {
       threshold += this.config.advanced.strictSessionReject ? 100 : 6;
+    }
+
+    if (marketQualityScore < Number(this.config.trading.marketQualityMinScore || 52) + 8) {
+      threshold += 6;
+    } else if (marketQualityScore >= 75) {
+      threshold -= 2;
     }
 
     return clamp(threshold, 55, 98);
@@ -995,11 +1090,14 @@ class SignalEngine {
     const {
       latest2,
       candles2m,
+      ind1m,
       ind2m,
       ind5m,
       trendResult,
       trend15mResult,
+      candleInsight1m,
       candleInsight,
+      structure1m,
       structure2m,
       structure5m,
       spreadPct,
@@ -1011,6 +1109,7 @@ class SignalEngine {
       keyLevels,
       supportResistance,
       priceAction,
+      marketQuality,
     } = params;
 
     const reasons = [];
@@ -1053,6 +1152,29 @@ class SignalEngine {
       breakdown.candle -= 12;
       this.addReject(rejects, rejectCodes, 'CANDLE_CONFIRM_MISSING', 'Thiếu nến xác nhận LONG theo Price Action');
       hardRejectSet.add('CANDLE_CONFIRM_MISSING');
+    }
+
+    const microLongConfirm = Boolean(
+      (ind1m?.latest?.ma7 || 0) >= (ind1m?.latest?.ma25 || 0) &&
+        (ind1m?.latest?.ma7Slope || 0) > 0 &&
+        (ind1m?.latest?.rsi14 || 50) >= 36 &&
+        (ind1m?.latest?.rsi14 || 50) <= 64 &&
+        (candleInsight1m?.patterns?.bullishConfirm || structure1m?.structure === 'BULLISH'),
+    );
+    if (this.config.trading.requireMicro1mConfirm) {
+      if (microLongConfirm) {
+        breakdown.candle += 6;
+        reasons.push('1m xác nhận tăng cùng chiều (micro confirm)');
+      } else {
+        breakdown.candle -= 10;
+        this.addReject(
+          rejects,
+          rejectCodes,
+          'MICRO_1M_NOT_CONFIRMED',
+          '1m chưa xác nhận LONG, tránh vào sớm sai nhịp',
+        );
+        hardRejectSet.add('MICRO_1M_NOT_CONFIRMED');
+      }
     }
     if (priceAction?.antiFomo?.streakFomo) {
       breakdown.noisePenalty -= 15;
@@ -1148,6 +1270,19 @@ class SignalEngine {
         breakdown.confluence15m -= 12;
         this.addReject(rejects, rejectCodes, 'TREND_15M_CONFLICT', '15m đang nghịch chiều LONG');
       }
+    }
+
+    if (Number(marketQuality?.score || 0) >= 75) {
+      breakdown.trend += 4;
+      reasons.push('Chất lượng thị trường tốt, setup sạch');
+    } else if (Number(marketQuality?.score || 0) < Number(this.config.trading.marketQualityMinScore || 52) + 8) {
+      breakdown.riskPenalty -= 8;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'LOW_MARKET_QUALITY_CONTEXT',
+        'Market quality thấp, ưu tiên bỏ qua LONG',
+      );
     }
 
     const pullback =
@@ -1286,7 +1421,10 @@ class SignalEngine {
       this.addReject(rejects, rejectCodes, 'STRUCTURE_5M_CONFLICT', 'Cấu trúc 5m suy yếu, không LONG');
     }
 
-    if (positionInRange >= 0.84) {
+    const longHardZone = clamp(Number(this.config.trading.entryTimingLongMaxRangePos || 0.8), 0.5, 0.95);
+    const longWarnZone = Math.max(0.68, longHardZone - 0.08);
+
+    if (positionInRange >= longHardZone) {
       breakdown.noisePenalty -= 12;
       this.addReject(
         rejects,
@@ -1294,10 +1432,8 @@ class SignalEngine {
         'LATE_ENTRY',
         `Entry LONG ở cuối sóng (${(positionInRange * 100).toFixed(1)}% biên gần nhất)`,
       );
-      if (positionInRange >= 0.9) {
-        hardRejectSet.add('LATE_ENTRY');
-      }
-    } else if (positionInRange >= 0.76) {
+      hardRejectSet.add('LATE_ENTRY');
+    } else if (positionInRange >= longWarnZone) {
       breakdown.noisePenalty -= 6;
       risks.push('Entry LONG hơi muộn, cần cẩn trọng');
     }
@@ -1379,6 +1515,8 @@ class SignalEngine {
         'DMI_CONFLICT',
         'HIGH_SPREAD',
         'LOW_VOLATILITY',
+        'MICRO_1M_NOT_CONFIRMED',
+        'LATE_ENTRY',
       ]);
       const blocked = uniqueRejectCodes.filter((code) => strictGateSet.has(code));
       if (blocked.length) {
@@ -1416,11 +1554,14 @@ class SignalEngine {
     const {
       latest2,
       candles2m,
+      ind1m,
       ind2m,
       ind5m,
       trendResult,
       trend15mResult,
+      candleInsight1m,
       candleInsight,
+      structure1m,
       structure2m,
       structure5m,
       spreadPct,
@@ -1432,6 +1573,7 @@ class SignalEngine {
       keyLevels,
       supportResistance,
       priceAction,
+      marketQuality,
     } = params;
 
     const reasons = [];
@@ -1474,6 +1616,29 @@ class SignalEngine {
       breakdown.candle -= 12;
       this.addReject(rejects, rejectCodes, 'CANDLE_CONFIRM_MISSING', 'Thiếu nến xác nhận SHORT theo Price Action');
       hardRejectSet.add('CANDLE_CONFIRM_MISSING');
+    }
+
+    const microShortConfirm = Boolean(
+      (ind1m?.latest?.ma7 || 0) <= (ind1m?.latest?.ma25 || 0) &&
+        (ind1m?.latest?.ma7Slope || 0) < 0 &&
+        (ind1m?.latest?.rsi14 || 50) >= 36 &&
+        (ind1m?.latest?.rsi14 || 50) <= 64 &&
+        (candleInsight1m?.patterns?.bearishConfirm || structure1m?.structure === 'BEARISH'),
+    );
+    if (this.config.trading.requireMicro1mConfirm) {
+      if (microShortConfirm) {
+        breakdown.candle += 6;
+        reasons.push('1m xác nhận giảm cùng chiều (micro confirm)');
+      } else {
+        breakdown.candle -= 10;
+        this.addReject(
+          rejects,
+          rejectCodes,
+          'MICRO_1M_NOT_CONFIRMED',
+          '1m chưa xác nhận SHORT, tránh vào sớm sai nhịp',
+        );
+        hardRejectSet.add('MICRO_1M_NOT_CONFIRMED');
+      }
     }
     if (priceAction?.antiFomo?.streakFomo) {
       breakdown.noisePenalty -= 15;
@@ -1569,6 +1734,19 @@ class SignalEngine {
         breakdown.confluence15m -= 12;
         this.addReject(rejects, rejectCodes, 'TREND_15M_CONFLICT', '15m đang nghịch chiều SHORT');
       }
+    }
+
+    if (Number(marketQuality?.score || 0) >= 75) {
+      breakdown.trend += 4;
+      reasons.push('Chất lượng thị trường tốt, setup sạch');
+    } else if (Number(marketQuality?.score || 0) < Number(this.config.trading.marketQualityMinScore || 52) + 8) {
+      breakdown.riskPenalty -= 8;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'LOW_MARKET_QUALITY_CONTEXT',
+        'Market quality thấp, ưu tiên bỏ qua SHORT',
+      );
     }
 
     const pullback =
@@ -1707,7 +1885,10 @@ class SignalEngine {
       this.addReject(rejects, rejectCodes, 'STRUCTURE_5M_CONFLICT', 'Cấu trúc 5m suy yếu cho SHORT');
     }
 
-    if (positionInRange <= 0.16) {
+    const shortHardZone = clamp(Number(this.config.trading.entryTimingShortMinRangePos || 0.2), 0.05, 0.5);
+    const shortWarnZone = Math.min(0.32, shortHardZone + 0.08);
+
+    if (positionInRange <= shortHardZone) {
       breakdown.noisePenalty -= 12;
       this.addReject(
         rejects,
@@ -1715,10 +1896,8 @@ class SignalEngine {
         'LATE_ENTRY',
         `Entry SHORT ở cuối sóng (${(positionInRange * 100).toFixed(1)}% biên gần nhất)`,
       );
-      if (positionInRange <= 0.1) {
-        hardRejectSet.add('LATE_ENTRY');
-      }
-    } else if (positionInRange <= 0.24) {
+      hardRejectSet.add('LATE_ENTRY');
+    } else if (positionInRange <= shortWarnZone) {
       breakdown.noisePenalty -= 6;
       risks.push('Entry SHORT hơi muộn, cần cẩn trọng');
     }
@@ -1800,6 +1979,8 @@ class SignalEngine {
         'DMI_CONFLICT',
         'HIGH_SPREAD',
         'LOW_VOLATILITY',
+        'MICRO_1M_NOT_CONFIRMED',
+        'LATE_ENTRY',
       ]);
       const blocked = uniqueRejectCodes.filter((code) => strictGateSet.has(code));
       if (blocked.length) {

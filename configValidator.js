@@ -100,6 +100,15 @@ function validateCoreConfig(config) {
   if (!inRange(t.minAdx, 5, 60)) {
     errors.push('trading.minAdx phai trong [5,60]');
   }
+  if (!inRange(t.marketQualityMinScore, 0, 100)) {
+    errors.push('trading.marketQualityMinScore phai trong [0,100]');
+  }
+  if (!inRange(t.entryTimingLongMaxRangePos, 0.5, 0.95)) {
+    errors.push('trading.entryTimingLongMaxRangePos phai trong [0.5,0.95]');
+  }
+  if (!inRange(t.entryTimingShortMinRangePos, 0.05, 0.5)) {
+    errors.push('trading.entryTimingShortMinRangePos phai trong [0.05,0.5]');
+  }
   if (!Number.isFinite(t.bbSqueezeMax) || t.bbSqueezeMax < 0) {
     errors.push('trading.bbSqueezeMax phai la so khong am');
   }
