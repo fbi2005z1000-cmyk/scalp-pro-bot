@@ -40,6 +40,7 @@ class TelegramService {
       routes.push({
         id: 'PRIMARY',
         name: this.config.primaryName || 'BOT THANH KHOẢN CAO',
+        icon: this.config.primaryIcon || '🔵',
         token: this.config.token,
         chatIds: primaryIds,
         symbols: toSet(this.config.highLiqSymbols),
@@ -51,6 +52,7 @@ class TelegramService {
       routes.push({
         id: 'SECONDARY',
         name: this.config.secondaryName || 'BOT SCP',
+        icon: this.config.secondaryIcon || '🟢',
         token: this.config.secondaryToken,
         chatIds: secondaryIds,
         symbols: toSet(this.config.scpSymbols),
@@ -109,7 +111,38 @@ class TelegramService {
     if (s.includes('BTC')) return '₿🟠';
     if (s.includes('ETH')) return 'Ξ🟣';
     if (s.includes('SOL')) return '◎🟢';
+    if (s.includes('BNB')) return '🟡';
+    if (s.includes('XRP')) return '❎';
+    if (s.includes('DOGE')) return '🐶';
+    if (s.includes('ADA')) return '🔷';
+    if (s.includes('TRX')) return '🔺';
+    if (s.includes('LINK')) return '🔗';
+    if (s.includes('MATIC')) return '🧿';
+    if (s.includes('AVAX')) return '🏔️';
+    if (s.includes('LTC')) return '🥈';
+    if (s.includes('DOT')) return '🟣';
+    if (s.includes('ATOM')) return '⚛️';
+    if (s.includes('APT')) return '🅰️';
+    if (s.includes('NEAR')) return '🌗';
+    if (s.includes('FIL')) return '📁';
+    if (s.includes('ETC')) return '💚';
+    if (s.includes('BCH')) return '🟩';
+    if (s.includes('PEPE')) return '🐸';
+    if (s.includes('SUI')) return '💧';
+    if (s.includes('SEI')) return '🧠';
+    if (s.includes('ARB')) return '🔷';
+    if (s.includes('OP')) return '🟥';
+    if (s.includes('UNI')) return '🦄';
     return '🔹';
+  }
+
+  getBotBadge(options = {}) {
+    const routes = this.getTargetRoutes(options);
+    if (!routes.length) return '🤖 BOT';
+    if (routes.length === 1) {
+      return `${routes[0].icon || '🤖'} ${routes[0].name}`;
+    }
+    return `${this.config.sentryIcon || '🛰️'} BOT SOI TỔNG`;
   }
 
   enqueue(task) {
@@ -178,15 +211,34 @@ class TelegramService {
   }
 
   async sendText(message, options = {}) {
-    if (!this.isEnabled()) return;
+    if (!this.isEnabled()) {
+      return {
+        ok: false,
+        reason: 'TELEGRAM_DISABLED_OR_NO_ROUTE',
+        attempted: 0,
+        successCount: 0,
+        failCount: 0,
+        errors: [],
+      };
+    }
     const routes = this.getTargetRoutes(options);
-    if (!routes.length) return;
+    if (!routes.length) {
+      return {
+        ok: false,
+        reason: 'NO_TARGET_ROUTE',
+        attempted: 0,
+        successCount: 0,
+        failCount: 0,
+        errors: [],
+      };
+    }
 
     return this.enqueue(async () => {
       await this.cooldown(options.cooldownMs);
       const idempotencyKey = options.idempotencyKey || null;
       let successCount = 0;
       let failCount = 0;
+      const errors = [];
 
       for (const route of routes) {
         const routeIdem = idempotencyKey ? `${idempotencyKey}:${route.id}` : null;
@@ -203,6 +255,12 @@ class TelegramService {
             successCount += 1;
           } catch (error) {
             failCount += 1;
+            errors.push({
+              route: route.id,
+              routeName: route.name,
+              chatId,
+              error: error.message,
+            });
             this.logger.error('telegram', 'Gửi Telegram text lỗi theo chat', {
               route: route.name,
               chatId,
@@ -224,9 +282,25 @@ class TelegramService {
         } else {
           this.logger.telegram('Đã gửi Telegram text', { idempotencyKey });
         }
+        return {
+          ok: true,
+          reason: failCount > 0 ? 'PARTIAL_SUCCESS' : 'SUCCESS',
+          attempted: successCount + failCount,
+          successCount,
+          failCount,
+          errors,
+        };
       } else {
         this.metrics.failed += 1;
         this.logger.error('telegram', 'Gửi Telegram text lỗi toàn bộ chat', { idempotencyKey });
+        return {
+          ok: false,
+          reason: 'ALL_CHAT_FAILED',
+          attempted: failCount,
+          successCount: 0,
+          failCount,
+          errors,
+        };
       }
     });
   }
@@ -565,6 +639,7 @@ class TelegramService {
 
     const icon = side === 'LONG' ? '🟢' : '🔴';
     const coinIcon = this.getSymbolIcon(preData.symbol);
+    const botBadge = this.getBotBadge({ symbol: preData.symbol });
     const trigger = Number(preData.triggerPrice || 0);
     const sl = Number(preData.stopLoss || 0);
     const tp1 = Number(preData.tp1 || 0);
@@ -595,6 +670,8 @@ class TelegramService {
     };
 
     const text = [
+      `${botBadge}`,
+      `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(preData.symbol || 'N/A')}</b>`,
       `🟡 <b>KÈO CHUẨN BỊ</b> | ${icon} <b>${side}</b> | ${coinIcon} <b>${esc(preData.symbol || 'N/A')}</b> | <b>${esc(preData.timeframe || 'N/A')}</b>`,
       ``,
       `⏳ Còn khoảng: <b>${remainingCandles || '?'} nến</b> (${etaMin} phút)`,
@@ -684,8 +761,11 @@ class TelegramService {
       : ['- ✅ Chưa thấy điểm yếu lớn'];
 
     const coinIcon = this.getSymbolIcon(signalData.symbol);
+    const botBadge = this.getBotBadge({ symbol: signalData.symbol });
     const timeframe = esc(signalData.signalTimeframe || '3m');
     const text = [
+      `${botBadge}`,
+      `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(signalData.symbol)}</b>`,
       `${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
       ``,
       `📍 <b>Vùng vào:</b> ${fmtPrice(entryMin)} - ${fmtPrice(entryMax)}`,
@@ -727,9 +807,11 @@ class TelegramService {
   async sendTradeOpened(orderData) {
     if (!this.config.sendOrderOpen) return;
     const coinIcon = this.getSymbolIcon(orderData.symbol);
+    const botBadge = this.getBotBadge({ symbol: orderData.symbol });
 
     await this.sendText(
       [
+        `${botBadge}`,
         `🚀 <b>ĐÃ VÀO LỆNH</b>`,
         `Coin: ${coinIcon} <b>${esc(orderData.symbol)}</b>`,
         `Loại: <b>${esc(orderData.side)}</b>`,
@@ -748,9 +830,11 @@ class TelegramService {
   async sendTakeProfit(tpData) {
     if (!this.config.sendOrderClose) return;
     const coinIcon = this.getSymbolIcon(tpData.symbol);
+    const botBadge = this.getBotBadge({ symbol: tpData.symbol });
 
     await this.sendText(
       [
+        `${botBadge}`,
         `💰 <b>CHỐT LỜI ${esc(tpData.tp)}</b>`,
         `Coin: ${coinIcon} <b>${esc(tpData.symbol)}</b>`,
         `Loại: ${esc(tpData.side)}`,
@@ -769,9 +853,11 @@ class TelegramService {
   async sendStopLoss(slData) {
     if (!this.config.sendOrderClose) return;
     const coinIcon = this.getSymbolIcon(slData.symbol);
+    const botBadge = this.getBotBadge({ symbol: slData.symbol });
 
     await this.sendText(
       [
+        `${botBadge}`,
         `❌ <b>STOP LOSS</b>`,
         `Coin: ${coinIcon} <b>${esc(slData.symbol)}</b>`,
         `Loại: ${esc(slData.side)}`,
@@ -794,6 +880,7 @@ class TelegramService {
     const side = String(heartbeat.side || '').toUpperCase();
     const icon = side === 'LONG' ? '🟢' : '🔴';
     const coinIcon = this.getSymbolIcon(heartbeat.symbol);
+    const botBadge = this.getBotBadge({ symbol: heartbeat.symbol });
     const prob = Number(heartbeat.probability || 0);
     const rawPnl = Number(heartbeat.rawPnlPct || 0);
     const levPnl = Number(heartbeat.leveragedPnlPct || 0);
@@ -805,6 +892,7 @@ class TelegramService {
     const cooldownMs = Math.max(5000, Number(this.config.positionHeartbeatMs || 5000));
 
     const text = [
+      `${botBadge}`,
       `🛡️ <b>GIÁM SÁT LỆNH 5S</b> ${icon} <b>${esc(side)}</b>`,
       `Coin: ${coinIcon} <b>${esc(heartbeat.symbol || 'N/A')}</b>`,
       `Giá hiện tại: <b>${Number(heartbeat.currentPrice || 0).toFixed(2)}</b> ${dirIcon} ${direction}`,

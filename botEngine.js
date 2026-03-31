@@ -955,11 +955,6 @@ class BotEngine {
       return;
     }
 
-    if (this.positionPulseEndAt && Date.now() >= this.positionPulseEndAt) {
-      this.stopPositionPulse(true);
-      return;
-    }
-
     const ob = this.stateStore.state.orderBook || {};
     const currentPrice =
       this.config.trading.priceSource === 'MARK'
@@ -1013,10 +1008,8 @@ class BotEngine {
     const intervalMs = Math.max(5000, Number(this.config.telegram.positionHeartbeatMs || 5000));
     if (this.positionPulseTimer) return;
 
-    const tf = position.signal?.signalTimeframe || this.config.timeframe.analysis || '3m';
-    const tfSec = this.timeframeToSec(tf);
-    const nowSec = Math.floor(Date.now() / 1000);
-    this.positionPulseEndAt = (Math.floor(nowSec / tfSec) + 1) * tfSec * 1000;
+    // Giữ heartbeat tới khi vị thế đóng hẳn (không dừng ở cuối 1 nến).
+    this.positionPulseEndAt = 0;
     this.positionPulseLastPrice = null;
     this.positionPulseEndedPositionId = null;
 
@@ -1569,6 +1562,12 @@ class BotEngine {
   }
 
   async sendTelegramTest(payload = {}) {
+    if (!this.telegramService.isEnabled || !this.telegramService.isEnabled()) {
+      throw new Error(
+        'Telegram chưa bật hoặc chưa có route hợp lệ. Kiểm tra TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_SECONDARY_*',
+      );
+    }
+
     const route = String(payload.route || 'ALL').toUpperCase();
     const forceRoute = route === 'PRIMARY' || route === 'SECONDARY' ? route : '';
     const symbol = payload.symbol ? String(payload.symbol).toUpperCase() : '';
@@ -1594,10 +1593,11 @@ class BotEngine {
     let sentSticker = false;
     let sentAnimation = false;
     let sentDice = false;
+    let textReport = null;
 
     if (message) {
-      await this.telegramService.sendText(message, options);
-      sentText = true;
+      textReport = await this.telegramService.sendText(message, options);
+      sentText = Boolean(textReport?.ok);
     }
 
     if (sticker) {
@@ -1630,6 +1630,13 @@ class BotEngine {
       sentDice,
     });
 
+    if (!sentText && !sentSticker && !sentAnimation && !sentDice) {
+      const firstError = textReport?.errors?.[0]?.error || '';
+      throw new Error(
+        `Không gửi được Telegram. ${firstError || 'Kiểm tra bot token, chat id, và quyền bot trong group.'}`,
+      );
+    }
+
     return {
       route,
       symbol: symbol || null,
@@ -1637,6 +1644,7 @@ class BotEngine {
       sentSticker,
       sentAnimation,
       sentDice,
+      textReport,
     };
   }
 
