@@ -205,6 +205,8 @@ function validateConfigBody(body, runtimeConfig) {
       'maxSignalAgeMs',
       'liveAnalyzeIntervalMs',
       'preSignalMinProbability',
+      'preSignalPack1MinProbability',
+      'preSignalPack2MinScore',
       'preSignalWatchDistancePct',
       'preSignalArmDistancePct',
       'preSignalEmitIntervalMs',
@@ -237,6 +239,18 @@ function validateConfigBody(body, runtimeConfig) {
       errors.push(toError('preSignalEnabled phai la boolean', 'trading.preSignalEnabled'));
     }
     if (
+      Object.prototype.hasOwnProperty.call(body.trading, 'preSignalRequireConsensus') &&
+      typeof body.trading.preSignalRequireConsensus !== 'boolean'
+    ) {
+      errors.push(toError('preSignalRequireConsensus phai la boolean', 'trading.preSignalRequireConsensus'));
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body.trading, 'entryConfirmRequirePack2') &&
+      typeof body.trading.entryConfirmRequirePack2 !== 'boolean'
+    ) {
+      errors.push(toError('entryConfirmRequirePack2 phai la boolean', 'trading.entryConfirmRequirePack2'));
+    }
+    if (
       Object.prototype.hasOwnProperty.call(body.trading, 'dynamicLeverageEnabled') &&
       typeof body.trading.dynamicLeverageEnabled !== 'boolean'
     ) {
@@ -266,6 +280,17 @@ function validateConfigBody(body, runtimeConfig) {
   }
   if (mergedTrading.preSignalMinProbability < 0 || mergedTrading.preSignalMinProbability > 100) {
     errors.push(toError('preSignalMinProbability phai trong [0,100]', 'trading.preSignalMinProbability'));
+  }
+  if (
+    mergedTrading.preSignalPack1MinProbability < 0 ||
+    mergedTrading.preSignalPack1MinProbability > 100
+  ) {
+    errors.push(
+      toError('preSignalPack1MinProbability phai trong [0,100]', 'trading.preSignalPack1MinProbability'),
+    );
+  }
+  if (mergedTrading.preSignalPack2MinScore < 0 || mergedTrading.preSignalPack2MinScore > 100) {
+    errors.push(toError('preSignalPack2MinScore phai trong [0,100]', 'trading.preSignalPack2MinScore'));
   }
   if (mergedTrading.preSignalWatchDistancePct < 0) {
     errors.push(toError('preSignalWatchDistancePct phai >= 0', 'trading.preSignalWatchDistancePct'));

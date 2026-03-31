@@ -8,6 +8,7 @@ class SelfPingService {
     this.retryMs = Number(config?.selfPing?.retryMs) || 5000;
     this.timeoutMs = Number(config?.selfPing?.timeoutMs) || 4000;
     this.url = String(config?.selfPing?.url || '').trim();
+    this.localFallbackUrl = `http://127.0.0.1:${Number(config?.app?.port) || 3000}/api/health`;
     this.timer = null;
     this.inFlight = false;
     this.stopped = false;
@@ -60,31 +61,41 @@ class SelfPingService {
     this.inFlight = true;
     const startedAt = Date.now();
     try {
-      const resp = await axios.get(this.url, {
-        timeout: this.timeoutMs,
-        validateStatus: () => true,
-        headers: {
-          'x-self-ping': '1',
-        },
-      });
-      if (resp.status >= 200 && resp.status < 300) {
+      const primary = await this.#request(this.url);
+      if (primary.ok) {
         this.okCount += 1;
         this.lastOkAt = new Date().toISOString();
         this.logger.info('self-ping', 'Ping success', {
-          status: resp.status,
-          latencyMs: Date.now() - startedAt,
+          status: primary.status,
+          latencyMs: primary.latencyMs,
+          via: 'primary',
           okCount: this.okCount,
         });
         this.#schedule(this.intervalMs);
       } else {
-        this.failCount += 1;
-        this.logger.warn('self-ping', 'Ping HTTP error, retry in 5s', {
-          status: resp.status,
-          latencyMs: Date.now() - startedAt,
-          failCount: this.failCount,
-          url: this.url,
-        });
-        this.#schedule(this.retryMs);
+        const fallback = await this.#request(this.localFallbackUrl);
+        if (fallback.ok) {
+          this.okCount += 1;
+          this.lastOkAt = new Date().toISOString();
+          this.logger.info('self-ping', 'Ping success via local fallback', {
+            primaryStatus: primary.status,
+            fallbackStatus: fallback.status,
+            fallbackLatencyMs: fallback.latencyMs,
+            okCount: this.okCount,
+          });
+          this.#schedule(this.intervalMs);
+        } else {
+          this.failCount += 1;
+          this.logger.warn('self-ping', 'Ping HTTP error, retry in 5s', {
+            primaryStatus: primary.status,
+            primaryUrl: this.url,
+            fallbackStatus: fallback.status,
+            fallbackUrl: this.localFallbackUrl,
+            failCount: this.failCount,
+            totalLatencyMs: Date.now() - startedAt,
+          });
+          this.#schedule(this.retryMs);
+        }
       }
     } catch (error) {
       this.failCount += 1;
@@ -97,6 +108,29 @@ class SelfPingService {
       this.#schedule(this.retryMs);
     } finally {
       this.inFlight = false;
+    }
+  }
+
+  async #request(url) {
+    try {
+      const startedAt = Date.now();
+      const resp = await axios.get(url, {
+        timeout: this.timeoutMs,
+        validateStatus: () => true,
+        headers: { 'x-self-ping': '1' },
+      });
+      return {
+        ok: resp.status >= 200 && resp.status < 300,
+        status: resp.status,
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        latencyMs: 0,
+        error: error.message,
+      };
     }
   }
 }

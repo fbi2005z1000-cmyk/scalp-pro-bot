@@ -74,30 +74,39 @@ async function bootstrap() {
 
   app.use('/api', createApi({ botEngine, logger, statsService, glossary, stateStore, config }));
 
-  const frontendDirCandidate = path.resolve(__dirname, '..', 'frontend');
-  const rootDirCandidate = path.resolve(__dirname, '..');
-  const frontendIndexCandidate = path.resolve(frontendDirCandidate, 'index.html');
-  const rootIndexCandidate = path.resolve(rootDirCandidate, 'index.html');
+  const staticCandidates = [
+    path.resolve(__dirname, '..', 'frontend'),
+    path.resolve(__dirname, 'frontend'),
+    path.resolve(process.cwd(), 'frontend'),
+    path.resolve(__dirname, '..'),
+    path.resolve(process.cwd()),
+  ];
 
-  const useFrontendDir = fs.existsSync(frontendIndexCandidate);
-  const useRootDir = fs.existsSync(rootIndexCandidate);
+  let staticDir = staticCandidates[0];
+  let frontendIndex = path.resolve(staticDir, 'index.html');
+  let selectedLayout = 'unknown';
 
-  const staticDir = useFrontendDir ? frontendDirCandidate : rootDirCandidate;
-  const frontendIndex = useFrontendDir ? frontendIndexCandidate : rootIndexCandidate;
+  for (const candidate of staticCandidates) {
+    const indexPath = path.resolve(candidate, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      staticDir = candidate;
+      frontendIndex = indexPath;
+      selectedLayout = candidate.includes('frontend') ? 'frontend-folder' : 'root-files';
+      break;
+    }
+  }
 
   if (!fs.existsSync(frontendIndex)) {
     logger.warn('server', 'Không tìm thấy index.html (frontend hoặc root)', {
-      frontendDirCandidate,
-      frontendIndexCandidate,
-      rootDirCandidate,
-      rootIndexCandidate,
+      staticCandidates,
       cwd: process.cwd(),
+      __dirname,
     });
   } else {
     logger.info('server', 'Đã map static frontend', {
       staticDir,
       frontendIndex,
-      layout: useFrontendDir ? 'frontend-folder' : useRootDir ? 'root-files' : 'unknown',
+      layout: selectedLayout,
     });
   }
 

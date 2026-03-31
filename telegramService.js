@@ -696,6 +696,12 @@ class TelegramService {
         : countdownStep >= 1
         ? 'SÁT ĐIỂM VÀO'
         : 'ĐIỂM VÀO';
+    const packConsensus = preData.packConsensus || null;
+    const pack1 = preData.pack1 || null;
+    const pack2 = preData.pack2 || null;
+    const packLine = packConsensus
+      ? `🧠 Bộ lọc 2 tầng: P1 ${pack1?.ok ? '✅' : '❌'} | P2 ${pack2?.ok ? '✅' : '❌'} | Consensus ${packConsensus?.ok ? '✅' : '❌'}`
+      : '';
 
     const fmtPrice = (val) => {
       const n = Number(val);
@@ -710,6 +716,7 @@ class TelegramService {
       ``,
       `${countdownIcon} Còn: <b>${countdownText}</b> (${etaMin} phút)`,
       `📌 Nhịp báo trước khung này: <b>${leadCandles} nến</b>`,
+      packLine,
       this.buildEntryCandleColorText(side, true),
       `📍 Vùng trigger: <b>${fmtPrice(trigger)}</b>`,
       `🛑 SL dự kiến: <b>${fmtPrice(sl)}</b>`,
@@ -829,6 +836,12 @@ class TelegramService {
     const coinIcon = this.getSymbolIcon(signalData.symbol);
     const botBadge = this.getBotBadge({ symbol: signalData.symbol });
     const timeframe = esc(signalData.signalTimeframe || '3m');
+    const preConsensus = signalData?.preSignal?.consensus || null;
+    const prePack1 = signalData?.preSignal?.packs?.pack1 || null;
+    const prePack2 = signalData?.preSignal?.packs?.pack2 || null;
+    const packStatusLine = preConsensus
+      ? `🧠 <b>Bộ lọc:</b> P1 ${prePack1?.ok ? '✅' : '❌'} | P2 ${prePack2?.ok ? '✅' : '❌'} | Consensus ${preConsensus?.ok ? '✅' : '❌'}`
+      : '';
     const text = [
       `${botBadge}`,
       `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(signalData.symbol)}</b>`,
@@ -845,6 +858,7 @@ class TelegramService {
       `${sideMeta.trendIcon} <b>Trend 5m:</b> ${esc(trendVi)}`,
       this.buildEntryCandleColorText(side, true),
       signalData.entryConfirmReason ? `🧩 <b>Xác nhận:</b> ${esc(String(signalData.entryConfirmReason))}` : '',
+      packStatusLine,
       ``,
       `✅ <b>Lý do vào:</b>`,
       ...reasonLines,

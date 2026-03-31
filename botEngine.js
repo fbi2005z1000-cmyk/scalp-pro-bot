@@ -796,7 +796,43 @@ class BotEngine {
     const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
     const side = String(signal.side || '').toUpperCase();
     const pre = signal.preSignal?.selected || null;
+    const preConsensus = signal.preSignal?.consensus || null;
+    const prePack2 = signal.preSignal?.packs?.pack2 || null;
     const tfSec = this.timeframeToSec(tf);
+
+    if (this.config.trading.preSignalRequireConsensus !== false) {
+      if (!preConsensus?.ok) {
+        return {
+          ok: false,
+          reason: preConsensus?.reason || 'WAIT_PACK_CONSENSUS',
+          remainingCandles: null,
+        };
+      }
+      if (preConsensus?.side && String(preConsensus.side).toUpperCase() !== side) {
+        return {
+          ok: false,
+          reason: 'PACK_CONSENSUS_SIDE_MISMATCH',
+          remainingCandles: null,
+        };
+      }
+    }
+
+    if (this.config.trading.entryConfirmRequirePack2 !== false) {
+      if (!prePack2?.ok) {
+        return {
+          ok: false,
+          reason: prePack2?.reason || 'WAIT_PACK2_CONFIRM',
+          remainingCandles: null,
+        };
+      }
+      if (prePack2?.side && String(prePack2.side).toUpperCase() !== side) {
+        return {
+          ok: false,
+          reason: 'PACK2_SIDE_MISMATCH',
+          remainingCandles: null,
+        };
+      }
+    }
 
     if (pre && String(pre.side || '').toUpperCase() === side) {
       const remain = Math.max(0, Math.ceil(Number(pre.etaSec || 0) / tfSec));
@@ -934,6 +970,9 @@ class BotEngine {
     if (!signal) return false;
     if (this.stateStore.state.activePosition) return false;
 
+    const preConsensus = signal.preSignal?.consensus || null;
+    if (this.config.trading.preSignalRequireConsensus !== false && !preConsensus?.ok) return false;
+
     const pre = signal.preSignal?.selected;
     if (!pre) return false;
     if (!['LONG', 'SHORT'].includes(pre.side)) return false;
@@ -1023,6 +1062,9 @@ class BotEngine {
       leadCandles,
       countdownStep: step,
       candleTime,
+      packConsensus: signal.preSignal?.consensus || null,
+      pack1: signal.preSignal?.packs?.pack1 || null,
+      pack2: signal.preSignal?.packs?.pack2 || null,
     });
 
     this.preSignalCountdownMap.set(campaignKey, {
@@ -1516,6 +1558,15 @@ class BotEngine {
     if (!signal || signal.side === 'NO_TRADE') {
       return { ok: false, reason: 'NO_TRADE' };
     }
+    const preConsensus = signal.preSignal?.consensus || null;
+    const prePack2 = signal.preSignal?.packs?.pack2 || null;
+    if (this.config.trading.preSignalRequireConsensus !== false && !preConsensus?.ok) {
+      return { ok: false, reason: preConsensus?.reason || 'TOTAL_BRAIN_WAIT_PACK_CONSENSUS' };
+    }
+    if (this.config.trading.entryConfirmRequirePack2 !== false && !prePack2?.ok) {
+      return { ok: false, reason: prePack2?.reason || 'TOTAL_BRAIN_WAIT_PACK2' };
+    }
+
     const hardRejectSet = new Set([
       'SIDEWAY',
       'BAD_RR',

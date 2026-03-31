@@ -171,6 +171,158 @@ class SignalEngine {
     };
   }
 
+  selectPack2Eval({ trend, longEval, shortEval }) {
+    if (trend === 'UP') return longEval;
+    if (trend === 'DOWN') return shortEval;
+    return Number(longEval?.score || 0) >= Number(shortEval?.score || 0) ? longEval : shortEval;
+  }
+
+  buildDualPreSignalPacks({
+    trend,
+    longCandidate,
+    shortCandidate,
+    longEval,
+    shortEval,
+  }) {
+    const modeRank = { ARMED: 3, READY_SOON: 2, EARLY_WATCH: 1 };
+    const rankedCandidates = [longCandidate, shortCandidate]
+      .filter(Boolean)
+      .sort((a, b) => {
+        if ((modeRank[b.mode] || 0) !== (modeRank[a.mode] || 0)) {
+          return (modeRank[b.mode] || 0) - (modeRank[a.mode] || 0);
+        }
+        if (b.probability !== a.probability) return b.probability - a.probability;
+        return Number(a.distancePct || 0) - Number(b.distancePct || 0);
+      });
+
+    const pack1MinProb = Number(
+      this.config.trading.preSignalPack1MinProbability || this.config.trading.preSignalMinProbability || 60,
+    );
+    const pack1Candidate = rankedCandidates[0] || null;
+    const pack1 =
+      pack1Candidate && Number(pack1Candidate.probability || 0) >= pack1MinProb
+        ? {
+            ok: true,
+            name: 'PACK_1',
+            gate: 'EARLY_SCOUT',
+            ...pack1Candidate,
+          }
+        : {
+            ok: false,
+            name: 'PACK_1',
+            gate: 'EARLY_SCOUT',
+            side: pack1Candidate?.side || null,
+            probability: Number(pack1Candidate?.probability || 0),
+            reason: pack1Candidate ? `Prob thấp hơn ngưỡng PACK_1 (${pack1MinProb})` : 'Chưa có setup PACK_1',
+          };
+
+    const pack2MinScore = Number(this.config.trading.preSignalPack2MinScore || 68);
+    const pack2Eval = this.selectPack2Eval({ trend, longEval, shortEval });
+    const pack2Side = String(pack2Eval?.side || '').toUpperCase();
+    const pack2Candidate = pack2Side === 'LONG' ? longCandidate : pack2Side === 'SHORT' ? shortCandidate : null;
+    const criticalRejectSet = new Set([
+      'LOW_VOLUME',
+      'WEAK_ORDERFLOW',
+      'HIGH_SPREAD',
+      'LOW_VOLATILITY',
+      'BOLLINGER_SQUEEZE',
+      'MACD_CONFLICT',
+      'STRICT_QUALITY_GATE',
+      'NEAR_STRONG_RESISTANCE',
+      'NEAR_STRONG_SUPPORT',
+      'LOW_REWARD_DISTANCE',
+    ]);
+    const blockedByCritical = Array.isArray(pack2Eval?.rejectCodes)
+      ? pack2Eval.rejectCodes.filter((code) => criticalRejectSet.has(String(code || '').toUpperCase()))
+      : [];
+    const pack2Score = Number(pack2Eval?.score || 0);
+    const pack2Ok =
+      Boolean(pack2Eval) &&
+      !pack2Eval.hardBlocked &&
+      pack2Score >= pack2MinScore &&
+      blockedByCritical.length === 0 &&
+      Boolean(pack2Candidate);
+
+    const pack2Mode =
+      pack2Score >= Number(this.config.trading.autoThreshold || 75)
+        ? 'ARMED'
+        : pack2Score >= Number(this.config.trading.semiThreshold || 61)
+        ? 'READY_SOON'
+        : 'EARLY_WATCH';
+
+    const pack2 = pack2Ok
+      ? {
+          ok: true,
+          name: 'PACK_2',
+          gate: 'STRICT_CONFIRM',
+          ...pack2Candidate,
+          mode: pack2Mode,
+          probability: clamp(Math.round(pack2Score), 0, 99),
+          reasons: (pack2Eval.reasons || []).slice(0, 4),
+        }
+      : {
+          ok: false,
+          name: 'PACK_2',
+          gate: 'STRICT_CONFIRM',
+          side: pack2Side || null,
+          probability: clamp(Math.round(pack2Score), 0, 99),
+          reason:
+            !pack2Eval
+              ? 'Chưa có setup PACK_2'
+              : pack2Eval.hardBlocked
+              ? `PACK_2 bị hard-block: ${(pack2Eval.hardRejectCodes || []).join(', ') || 'UNKNOWN'}`
+              : blockedByCritical.length
+              ? `PACK_2 bị chặn bởi reject critical: ${blockedByCritical.join(', ')}`
+              : !pack2Candidate
+              ? 'PACK_2 chưa có trigger zone/MA25 phù hợp'
+              : `Score PACK_2 thấp hơn ngưỡng (${pack2MinScore})`,
+        };
+
+    const requireConsensus = this.config.trading.preSignalRequireConsensus !== false;
+    const sameSide = Boolean(pack1.ok && pack2.ok && pack1.side === pack2.side);
+
+    let consensusOk = false;
+    let selected = null;
+    let reason = 'NO_PACK_PASS';
+
+    if (requireConsensus) {
+      if (sameSide) {
+        consensusOk = true;
+        selected = {
+          ...pack2,
+          mode: (modeRank[pack2.mode] || 0) >= (modeRank[pack1.mode] || 0) ? pack2.mode : pack1.mode,
+          probability: clamp(Math.round(Number(pack2.probability || 0) * 0.6 + Number(pack1.probability || 0) * 0.4), 0, 99),
+          reasons: Array.from(new Set([...(pack2.reasons || []), ...(pack1.reasons || [])])).slice(0, 4),
+          source: 'PACK_1+PACK_2',
+        };
+        reason = 'PACK_CONSENSUS_OK';
+      } else {
+        reason = 'PACK_CONSENSUS_MISMATCH';
+      }
+    } else if (pack2.ok) {
+      consensusOk = true;
+      selected = { ...pack2, source: 'PACK_2' };
+      reason = 'PACK_2_OK';
+    } else if (pack1.ok) {
+      consensusOk = true;
+      selected = { ...pack1, source: 'PACK_1' };
+      reason = 'PACK_1_OK';
+    }
+
+    return {
+      pack1,
+      pack2,
+      consensus: {
+        ok: consensusOk,
+        reason,
+        sameSide,
+        requireConsensus,
+        side: selected?.side || null,
+      },
+      selected,
+    };
+  }
+
   buildPreSignal({
     currentPrice,
     trendResult,
@@ -211,19 +363,25 @@ class SignalEngine {
       keyLevels,
     });
 
-    const modeRank = { ARMED: 3, READY_SOON: 2, EARLY_WATCH: 1 };
-    const selected = [longCandidate, shortCandidate]
-      .filter(Boolean)
-      .sort((a, b) => {
-        if ((modeRank[b.mode] || 0) !== (modeRank[a.mode] || 0)) return (modeRank[b.mode] || 0) - (modeRank[a.mode] || 0);
-        if (b.probability !== a.probability) return b.probability - a.probability;
-        return a.distancePct - b.distancePct;
-      })[0] || null;
+    const dualPacks = this.buildDualPreSignalPacks({
+      trend: trendResult.trend,
+      longCandidate,
+      shortCandidate,
+      longEval,
+      shortEval,
+    });
+
+    const selected = dualPacks.selected;
 
     return {
       selected,
       long: longCandidate,
       short: shortCandidate,
+      packs: {
+        pack1: dualPacks.pack1,
+        pack2: dualPacks.pack2,
+      },
+      consensus: dualPacks.consensus,
       generatedAt: Date.now(),
     };
   }
