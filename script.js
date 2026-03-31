@@ -598,6 +598,204 @@
     return points;
   }
 
+  function calcAtrPct(candles, period = 14) {
+    if (!Array.isArray(candles) || candles.length < period + 1) return null;
+    const trs = [];
+    for (let i = 1; i < candles.length; i += 1) {
+      const c = candles[i];
+      const prev = candles[i - 1];
+      const tr = Math.max(
+        Number(c.high) - Number(c.low),
+        Math.abs(Number(c.high) - Number(prev.close)),
+        Math.abs(Number(c.low) - Number(prev.close)),
+      );
+      trs.push(tr);
+    }
+    if (trs.length < period) return null;
+    const recent = trs.slice(-period);
+    const atr = recent.reduce((s, v) => s + v, 0) / period;
+    const close = Number(candles[candles.length - 1]?.close || 0);
+    if (!(close > 0)) return null;
+    return atr / close;
+  }
+
+  function buildLocalPressure(candles) {
+    if (!Array.isArray(candles) || candles.length < 6) return {};
+    const slice = candles.slice(-8);
+    let buyRaw = 0;
+    let sellRaw = 0;
+    let bodyRatioSum = 0;
+    let wickPenaltySum = 0;
+    const vols = slice.map((c) => Number(c.volume || 0));
+
+    for (const c of slice) {
+      const open = Number(c.open);
+      const close = Number(c.close);
+      const high = Number(c.high);
+      const low = Number(c.low);
+      const vol = Number(c.volume || 0);
+      const range = Math.max(high - low, 1e-8);
+      const body = Math.abs(close - open);
+      const closePos = (close - low) / range;
+      const upperWick = Math.max(0, high - Math.max(open, close));
+      const lowerWick = Math.max(0, Math.min(open, close) - low);
+
+      bodyRatioSum += body / range;
+      wickPenaltySum += Math.abs(upperWick - lowerWick) / range;
+
+      const base = body * vol;
+      buyRaw += base * closePos;
+      sellRaw += base * (1 - closePos);
+      if (close > open) buyRaw += base * 0.12;
+      if (close < open) sellRaw += base * 0.12;
+    }
+
+    const total = Math.max(1e-8, buyRaw + sellRaw);
+    const buyPressure = (buyRaw / total) * 100;
+    const sellPressure = (sellRaw / total) * 100;
+
+    const avgVol = vols.slice(0, -1).reduce((s, v) => s + v, 0) / Math.max(1, vols.length - 1);
+    const lastVol = vols[vols.length - 1] || 0;
+    const deltaVolumeTrend = avgVol > 0 ? ((lastVol - avgVol) / avgVol) * 100 : 0;
+
+    const firstOpen = Number(slice[0]?.open || 0);
+    const lastClose = Number(slice[slice.length - 1]?.close || 0);
+    const priceSpeed = firstOpen > 0 ? ((lastClose - firstOpen) / firstOpen) / slice.length : 0;
+    const candleStrength = Math.max(0, Math.min(100, (bodyRatioSum / slice.length) * 100));
+    const absorptionScore = Math.max(0, Math.min(100, 100 - (wickPenaltySum / slice.length) * 100));
+
+    let volumeStatus = 'TRUNG_BÌNH';
+    if (deltaVolumeTrend >= 20) volumeStatus = 'CAO';
+    else if (deltaVolumeTrend <= -20) volumeStatus = 'THẤP';
+
+    return {
+      buyPressure,
+      sellPressure,
+      candleStrength,
+      deltaVolumeTrend,
+      priceSpeed,
+      absorptionScore,
+      volumeStatus,
+    };
+  }
+
+  function buildLocalSupportResistance(candles) {
+    if (!Array.isArray(candles) || candles.length < 40) return null;
+    const src = candles.slice(-260);
+    const current = Number(src[src.length - 1]?.close || 0);
+    if (!(current > 0)) return null;
+
+    const highs = [];
+    const lows = [];
+    for (let i = 2; i < src.length - 2; i += 1) {
+      const c = src[i];
+      const h = Number(c.high);
+      const l = Number(c.low);
+      const isHigh =
+        h > Number(src[i - 1].high) &&
+        h > Number(src[i - 2].high) &&
+        h >= Number(src[i + 1].high) &&
+        h >= Number(src[i + 2].high);
+      const isLow =
+        l < Number(src[i - 1].low) &&
+        l < Number(src[i - 2].low) &&
+        l <= Number(src[i + 1].low) &&
+        l <= Number(src[i + 2].low);
+      if (isHigh) highs.push(h);
+      if (isLow) lows.push(l);
+    }
+
+    const cluster = (levels, type) => {
+      if (!levels.length) return [];
+      const sorted = [...levels].sort((a, b) => (type === 'resistance' ? b - a : a - b));
+      const groups = [];
+      const band = current * 0.0012;
+      for (const p of sorted) {
+        const found = groups.find((g) => Math.abs(g.price - p) <= band);
+        if (found) {
+          found.tests += 1;
+          found.price = (found.price * (found.tests - 1) + p) / found.tests;
+        } else {
+          groups.push({ price: p, tests: 1 });
+        }
+      }
+      return groups.slice(0, 3).map((g, idx) => {
+        const strength =
+          g.tests >= 4 ? 'EXTREME' : g.tests >= 3 ? 'STRONG' : g.tests >= 2 ? 'NORMAL' : 'WEAK';
+        return {
+          id: `${type}-${idx + 1}-${Math.round(g.price)}`,
+          label: `${type === 'support' ? 'S' : 'R'}${idx + 1}`,
+          displayLabel: `${type === 'support' ? 'S' : 'R'}${idx + 1} ${
+            type === 'support' ? 'Support (Hỗ trợ)' : 'Resistance (Kháng cự)'
+          } (local)`,
+          price: g.price,
+          strength,
+          tests: g.tests,
+          timeframe: state.timeframe,
+          type,
+          top: g.price * 1.00045,
+          bottom: g.price * 0.99955,
+          opacity: 0.16,
+          lineWidth: strength === 'EXTREME' ? 2 : 1,
+        };
+      });
+    };
+
+    const supports = cluster(lows, 'support').sort((a, b) => b.price - a.price);
+    const resistances = cluster(highs, 'resistance').sort((a, b) => a.price - b.price);
+    const zones = [...supports, ...resistances];
+
+    const nearestSupport = supports.filter((s) => s.price <= current).sort((a, b) => b.price - a.price)[0] || null;
+    const nearestResistance =
+      resistances.filter((r) => r.price >= current).sort((a, b) => a.price - b.price)[0] || null;
+    const distToSupportPct = nearestSupport ? Math.abs(current - nearestSupport.price) / current : null;
+    const distToResistancePct = nearestResistance ? Math.abs(nearestResistance.price - current) / current : null;
+
+    return {
+      supports,
+      resistances,
+      zones,
+      keyLevels: {
+        support: nearestSupport?.price ?? null,
+        resistance: nearestResistance?.price ?? null,
+        distToSupportPct,
+        distToResistancePct,
+        nearStrongSupport:
+          Boolean(nearestSupport) &&
+          ['STRONG', 'EXTREME'].includes(nearestSupport.strength) &&
+          distToSupportPct !== null &&
+          distToSupportPct <= 0.0022,
+        nearStrongResistance:
+          Boolean(nearestResistance) &&
+          ['STRONG', 'EXTREME'].includes(nearestResistance.strength) &&
+          distToResistancePct !== null &&
+          distToResistancePct <= 0.0022,
+      },
+      potential: {
+        longZone:
+          nearestSupport && distToSupportPct !== null && distToSupportPct <= 0.0032
+            ? {
+                ...nearestSupport,
+                intent: 'LONG',
+                blink: true,
+                score: Math.max(60, 90 - Math.round(distToSupportPct * 10000)),
+                mode: 'WATCH',
+              }
+            : null,
+        shortZone:
+          nearestResistance && distToResistancePct !== null && distToResistancePct <= 0.0032
+            ? {
+                ...nearestResistance,
+                intent: 'SHORT',
+                blink: true,
+                score: Math.max(60, 90 - Math.round(distToResistancePct * 10000)),
+                mode: 'WATCH',
+              }
+            : null,
+      },
+    };
+  }
+
   function clearPriceLines() {
     for (const line of state.priceLines) {
       candleSeries.removePriceLine(line);
@@ -1024,11 +1222,17 @@
 
     const market = signal.market || {};
     const analysisTf = signal.signalTimeframe || state.timeframe || '1m';
-    const sr = market.supportResistance || {};
+    let sr = market.supportResistance || {};
+    if ((!Array.isArray(sr.zones) || !sr.zones.length) && state.candles.length >= 40) {
+      sr = buildLocalSupportResistance(state.candles) || sr;
+    }
     state.srData = sr;
     state.entryHint = buildRealtimeEntryHint();
-    const pressure = market.pressure || {};
-    const volumeStatus = signal.volumeStatus || market.volumeStatus?.status || 'N/A';
+    const localPressure = buildLocalPressure(state.candles);
+    const pressure = Object.keys(market.pressure || {}).length ? market.pressure || {} : localPressure;
+    const volumeStatus = signal.volumeStatus || market.volumeStatus?.status || localPressure.volumeStatus || 'N/A';
+    const localIndicators = getLatestIndicatorSnapshot();
+    const atrPctFallback = calcAtrPct(state.candles, 14);
     const buyPressure = hasNum(signal.buyPressure) ? signal.buyPressure : pressure.buyPressure;
     const sellPressure = hasNum(signal.sellPressure) ? signal.sellPressure : pressure.sellPressure;
     const mainPressure =
@@ -1072,12 +1276,18 @@
       ['TP2', formatNum(signal.tp2), 'TP'],
       ['TP3', formatNum(signal.tp3), 'TP'],
       ['RR', formatNum(signal.rr), 'RR'],
-      [`ATR % (${analysisTf})`, hasNum(market.atrPct2m) ? `${formatNum(market.atrPct2m * 100, 3)}%` : 'N/A', 'VOLUME'],
-      [`RSI14 (${analysisTf})`, formatNum(market.rsi2m), 'RSI'],
-      [`MA7 (${analysisTf})`, formatNum(market.ma2m?.ma7), 'MA'],
-      [`MA25 (${analysisTf})`, formatNum(market.ma2m?.ma25), 'MA'],
-      [`MA99 (${analysisTf})`, formatNum(market.ma2m?.ma99), 'MA'],
-      [`MA200 (${analysisTf})`, formatNum(market.ma2m?.ma200), 'MA'],
+      [
+        `ATR % (${analysisTf})`,
+        hasNum(market.atrPct2m) || hasNum(atrPctFallback)
+          ? `${formatNum((hasNum(market.atrPct2m) ? market.atrPct2m : atrPctFallback) * 100, 3)}%`
+          : 'N/A',
+        'VOLUME',
+      ],
+      [`RSI14 (${analysisTf})`, formatNum(hasNum(market.rsi2m) ? market.rsi2m : localIndicators.rsi), 'RSI'],
+      [`MA7 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma7) ? market.ma2m?.ma7 : localIndicators.ma7), 'MA'],
+      [`MA25 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma25) ? market.ma2m?.ma25 : localIndicators.ma25), 'MA'],
+      [`MA99 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma99) ? market.ma2m?.ma99 : localIndicators.ma99), 'MA'],
+      [`MA200 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma200) ? market.ma2m?.ma200 : localIndicators.ma200), 'MA'],
       ['PA Structure', pa.structure || 'N/A', 'SIDEWAY'],
       ['PA Pullback', pa.pullbackQuality || 'N/A', 'ENTRY'],
       ['PA Candle Confirm', pa.candleConfirm ? 'Có' : 'Không', 'ENTRY'],
@@ -1269,12 +1479,28 @@
         const useStrict = forceFresh && strictFresh && tf === state.timeframe;
         try {
           const strictQ = useStrict ? '&strict=1' : '';
-          const data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
+          let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
+          if (forceFresh && Array.isArray(data) && data.length < 80) {
+            try {
+              const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+              if (direct.length > data.length) data = direct;
+            } catch (directError) {
+              console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
+            }
+          }
           return [tf, data];
         } catch (error) {
           if (useStrict) {
             console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
-            const data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+            let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+            if (forceFresh && Array.isArray(data) && data.length < 80) {
+              try {
+                const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+                if (direct.length > data.length) data = direct;
+              } catch (directError) {
+                console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
+              }
+            }
             return [tf, data];
           }
           throw error;
@@ -1320,6 +1546,14 @@
         candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
       } else {
         throw error;
+      }
+    }
+    if (forceFresh && Array.isArray(candles) && candles.length < 80) {
+      try {
+        const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+        if (direct.length > candles.length) candles = direct;
+      } catch (directError) {
+        console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
       }
     }
     const normalized = normalizeCandles(
@@ -1379,6 +1613,34 @@
   function getBinanceKlineWsBase() {
     const useTestnet = Boolean(state.status?.binance?.useTestnet);
     return useTestnet ? 'wss://stream.binancefuture.com/ws' : 'wss://fstream.binance.com/ws';
+  }
+
+  function getBinanceRestBase() {
+    const useTestnet = Boolean(state.status?.binance?.useTestnet);
+    return useTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+  }
+
+  async function fetchBinanceKlinesDirect(symbol, timeframe, limit = 600) {
+    const base = getBinanceRestBase();
+    const url = `${base}/fapi/v1/klines?symbol=${encodeURIComponent(
+      symbol,
+    )}&interval=${encodeURIComponent(timeframe)}&limit=${Math.max(100, Math.min(1200, Number(limit || 600)))}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Binance direct REST lỗi ${res.status}`);
+    }
+    const raw = await res.json();
+    if (!Array.isArray(raw)) return [];
+    const now = Date.now();
+    return raw.map((k) => ({
+      time: Math.floor(Number(k[0]) / 1000),
+      open: Number(k[1]),
+      high: Number(k[2]),
+      low: Number(k[3]),
+      close: Number(k[4]),
+      volume: Number(k[5]),
+      isClosed: Number(k[6]) <= now,
+    }));
   }
 
   function closeDirectKlineStream() {
@@ -1741,6 +2003,12 @@
     await bindActions();
     applyTimezoneToChart();
     await fetchGlossary();
+    try {
+      const status = await api.get('/status');
+      state.status = status;
+    } catch (error) {
+      console.warn('Không lấy được status trước khi tải nến', error);
+    }
     await loadInitialCandles(true, true);
     connectStream();
     await refreshSignalStatus();

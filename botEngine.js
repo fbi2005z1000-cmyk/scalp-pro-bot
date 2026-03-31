@@ -312,14 +312,15 @@ class BotEngine {
     });
   }
 
-  async fetchKlines(symbol, interval, limit = 600) {
-    if (Date.now() < this.restBlockedUntil) {
+  async fetchKlines(symbol, interval, limit = 600, options = {}) {
+    const priority = Boolean(options.priority);
+    if (!priority && Date.now() < this.restBlockedUntil) {
       const remainMs = this.restBlockedUntil - Date.now();
       const err = new Error(`REST_BLOCKED ${remainMs}ms`);
       err.code = 'REST_BLOCKED';
       throw err;
     }
-    if (!this.consumeRestBudget()) {
+    if (!priority && !this.consumeRestBudget()) {
       const remainMs = Math.max(0, this.restBlockedUntil - Date.now());
       const err = new Error(`REST_BLOCKED ${remainMs}ms`);
       err.code = 'REST_BLOCKED';
@@ -363,8 +364,9 @@ class BotEngine {
 
   async refreshCandles(symbol, interval, limit = this.config.timeframe.limit, options = {}) {
     const strict = Boolean(options.strict);
+    const priority = Boolean(options.priority);
     try {
-      const candles = await this.fetchKlines(symbol, interval, limit);
+      const candles = await this.fetchKlines(symbol, interval, limit, { priority });
       this.stateStore.setCandles(symbol, interval, candles, limit);
       return candles;
     } catch (error) {
@@ -384,7 +386,7 @@ class BotEngine {
     const settled = await Promise.allSettled(
       intervals.map(async (tf) => ({
         tf,
-        candles: await this.fetchKlines(symbol, tf, this.config.timeframe.limit),
+        candles: await this.fetchKlines(symbol, tf, this.config.timeframe.limit, { priority: true }),
       })),
     );
 
@@ -440,7 +442,7 @@ class BotEngine {
     if (now - lastSyncAt < 1200) return;
     this.lastClosedSyncByTf.set(key, now);
 
-    const latest = await this.fetchKlines(symbol, timeframe, 4);
+    const latest = await this.fetchKlines(symbol, timeframe, 4, { priority: true });
     const closed = latest.filter((c) => c.isClosed);
     if (!closed.length) return;
 
@@ -731,9 +733,13 @@ class BotEngine {
     const candles5m = this.stateStore.getCandles(symbol, '5m');
     const candles15m = this.stateStore.getCandles(symbol, '15m');
 
-    if (!candlesTf || candlesTf.length < 210) return;
-    if (!candles5m || candles5m.length < 210) return;
-    if (!candles15m || candles15m.length < 80) return;
+    const minAnalysis = Math.max(40, Number(this.config.advanced?.minCandlesAnalysis || 80));
+    const minTrend5 = Math.max(40, Number(this.config.advanced?.minCandlesTrend5m || 80));
+    const minTrend15 = Math.max(30, Number(this.config.advanced?.minCandlesTrend15m || 40));
+
+    if (!candlesTf || candlesTf.length < minAnalysis) return;
+    if (!candles5m || candles5m.length < minTrend5) return;
+    if (!candles15m || candles15m.length < minTrend15) return;
 
     const tfSignal = this.signalEngine.analyze({
       symbol,
@@ -758,7 +764,7 @@ class BotEngine {
   }
 
   getScannerTimeframes() {
-    return ['1m', '3m', '5m'];
+    return ['1m', '3m', '5m', '15m'];
   }
 
   async bootstrapScannerSymbols() {
@@ -812,9 +818,39 @@ class BotEngine {
     this.multiScanTimer = null;
   }
 
+  runTotalBrainGate(signal, timeframe) {
+    if (!signal || signal.side === 'NO_TRADE') {
+      return { ok: false, reason: 'NO_TRADE' };
+    }
+    const hardRejectSet = new Set([
+      'SIDEWAY',
+      'BAD_RR',
+      'LOW_CONFIDENCE',
+      'HIGH_SPREAD',
+      'HIGH_SLIPPAGE',
+      'HIGH_LATENCY',
+      'INSUFFICIENT_DATA',
+    ]);
+    const rejectCodes = Array.isArray(signal.rejectCodes) ? signal.rejectCodes : [];
+    const hardCode = rejectCodes.find((c) => hardRejectSet.has(String(c || '').toUpperCase()));
+    if (hardCode) {
+      return { ok: false, reason: `TOTAL_BRAIN_REJECT_${hardCode}` };
+    }
+
+    const tfBoost = timeframe === '15m' ? 0 : 2;
+    const minScore = Math.max(55, Number(this.config.trading.signalThreshold || 56) + tfBoost);
+    if (Number(signal.confidence || 0) < minScore) {
+      return { ok: false, reason: `TOTAL_BRAIN_LOW_SCORE_${signal.confidence}` };
+    }
+
+    return { ok: true };
+  }
+
   async dispatchActionableScanSignal(signal, timeframe, candleTime) {
     if (!signal || signal.side === 'NO_TRADE') return;
     if (signal.confidence < this.config.trading.signalThreshold) return;
+    const totalGate = this.runTotalBrainGate(signal, timeframe);
+    if (!totalGate.ok) return;
     const feeRates = await this.orderManager.getFeeRates(signal.symbol);
     signal.takerFeePct = Number(signal.takerFeePct || feeRates.takerFeePct);
     signal.makerFeePct = Number(signal.makerFeePct || feeRates.makerFeePct);
@@ -1657,11 +1693,21 @@ class BotEngine {
   }
 
   getStatus() {
+    const scannerSymbols = this.getScannerSymbols();
     return {
       ...this.stateStore.getStatus(),
       priceSource: this.config.trading.priceSource,
       advanced: this.config.advanced,
       positionSizing: this.config.positionSizing,
+      scanner: {
+        enabled: this.config.binance.scannerEnabled,
+        loopMs: this.config.binance.scannerLoopMs,
+        batchSize: this.config.binance.scannerBatchSize,
+        timeframes: this.getScannerTimeframes(),
+        symbols: scannerSymbols,
+        symbolCount: scannerSymbols.length,
+        totalBrainEnabled: true,
+      },
       leveragePolicy: {
         dynamicEnabled: this.config.trading.dynamicLeverageEnabled,
         min: this.config.trading.dynamicLeverageMin,

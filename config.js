@@ -191,6 +191,9 @@ const config = {
   advanced: {
     enabled: process.env.ADVANCED_ENABLED !== 'false',
     useTrend15mConfluence: process.env.USE_TREND_15M_CONFLUENCE !== 'false',
+    minCandlesAnalysis: toNumber(process.env.MIN_CANDLES_ANALYSIS, 80),
+    minCandlesTrend5m: toNumber(process.env.MIN_CANDLES_TREND_5M, 80),
+    minCandlesTrend15m: toNumber(process.env.MIN_CANDLES_TREND_15M, 40),
     minAtrPct2m: toNumber(process.env.MIN_ATR_PCT_2M, 0.0009),
     maxAtrPct2m: toNumber(process.env.MAX_ATR_PCT_2M, 0.008),
     sessionFilterEnabled: process.env.SESSION_FILTER_ENABLED === 'true',

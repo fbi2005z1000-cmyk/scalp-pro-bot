@@ -227,10 +227,21 @@ class SignalEngine {
   analyze({ symbol, candles1m, candles2m, candles5m, candles15m, orderBook, analysisTimeframe }) {
     const analysisTf = analysisTimeframe || this.config.timeframe.analysis || '3m';
     const candles15 = candles15m && candles15m.length ? candles15m : candles5m;
+    const minAnalysis = Math.max(40, Number(this.config.advanced?.minCandlesAnalysis || 80));
+    const minTrend5 = Math.max(40, Number(this.config.advanced?.minCandlesTrend5m || 80));
+    const minTrend15 = Math.max(30, Number(this.config.advanced?.minCandlesTrend15m || 40));
 
-    if (candles2m.length < 210 || candles5m.length < 210 || candles15.length < 80) {
+    if (candles2m.length < minAnalysis || candles5m.length < minTrend5 || candles15.length < minTrend15) {
       return this.noTrade(symbol, 'Thiếu dữ liệu nến để phân tích an toàn', {
         code: 'INSUFFICIENT_DATA',
+        diagnostics: {
+          candles2m: candles2m.length,
+          candles5m: candles5m.length,
+          candles15m: candles15.length,
+          minAnalysis,
+          minTrend5,
+          minTrend15,
+        },
       });
     }
 

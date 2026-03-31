@@ -99,7 +99,10 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     }
     try {
       if (fresh) {
-        const candles = await botEngine.refreshCandles(symbol, timeframe, limit, { strict });
+        const candles = await botEngine.refreshCandles(symbol, timeframe, limit, {
+          strict,
+          priority: true,
+        });
         return res.json({ ok: true, data: candles, fresh: true });
       }
       const candles = stateStore.getCandles(symbol, timeframe);
