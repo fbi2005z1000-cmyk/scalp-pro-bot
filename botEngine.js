@@ -361,12 +361,16 @@ class BotEngine {
     throw lastError;
   }
 
-  async refreshCandles(symbol, interval, limit = this.config.timeframe.limit) {
+  async refreshCandles(symbol, interval, limit = this.config.timeframe.limit, options = {}) {
+    const strict = Boolean(options.strict);
     try {
       const candles = await this.fetchKlines(symbol, interval, limit);
       this.stateStore.setCandles(symbol, interval, candles, limit);
       return candles;
     } catch (error) {
+      if (strict) {
+        throw error;
+      }
       if (this.isTransientRestError(error)) {
         return this.stateStore.getCandles(symbol, interval);
       }

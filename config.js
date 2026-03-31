@@ -83,7 +83,7 @@ const config = {
     restSoftLimitPerMin: toNumber(process.env.BINANCE_REST_SOFT_LIMIT_PER_MIN, 180),
     restBlock429Ms: toNumber(process.env.BINANCE_REST_BLOCK_429_MS, 45000),
     restBlock418Ms: toNumber(process.env.BINANCE_REST_BLOCK_418_MS, 600000),
-    restClosedSyncEnabled: process.env.REST_CLOSED_SYNC_ENABLED === 'true',
+    restClosedSyncEnabled: process.env.REST_CLOSED_SYNC_ENABLED !== 'false',
     restClosedSyncMinGapMs: toNumber(process.env.REST_CLOSED_SYNC_MIN_GAP_MS, 12000),
     scannerEnabled: process.env.MULTI_SCANNER_ENABLED !== 'false',
     scannerLoopMs: toNumber(process.env.MULTI_SCANNER_LOOP_MS, 8000),

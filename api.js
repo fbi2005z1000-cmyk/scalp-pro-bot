@@ -90,6 +90,7 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     const symbol = (req.query.symbol || stateStore.state.symbol).toUpperCase();
     const timeframe = req.query.timeframe || '1m';
     const fresh = String(req.query.fresh || '0') === '1';
+    const strict = String(req.query.strict || '0') === '1';
     const limit = Math.max(50, Math.min(1200, Number(req.query.limit || config.timeframe.limit || 600)));
     const analysisTf = config.timeframe.analysis || '3m';
     const allow = Array.from(new Set(['1m', '3m', analysisTf, '5m', '15m']));
@@ -98,12 +99,24 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     }
     try {
       if (fresh) {
-        const candles = await botEngine.refreshCandles(symbol, timeframe, limit);
+        const candles = await botEngine.refreshCandles(symbol, timeframe, limit, { strict });
         return res.json({ ok: true, data: candles, fresh: true });
       }
       const candles = stateStore.getCandles(symbol, timeframe);
       return res.json({ ok: true, data: candles, fresh: false });
     } catch (error) {
+      if (fresh && strict) {
+        logger.warn('api', 'Lỗi strict fresh candles', {
+          symbol,
+          timeframe,
+          error: error.message,
+        });
+        return res.status(502).json({
+          ok: false,
+          error: 'Không lấy được nến fresh strict từ Binance',
+          details: error.message,
+        });
+      }
       const transient =
         typeof botEngine.isTransientRestError === 'function'
           ? botEngine.isTransientRestError(error)

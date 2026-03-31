@@ -1261,14 +1261,31 @@
     }
   }
 
-  async function loadInitialCandles(forceFresh = false) {
+  async function loadInitialCandles(forceFresh = false, strictFresh = false) {
     const freshQ = forceFresh ? '&fresh=1' : '';
-    const [candles1m, candles3m, candles5m, candles15m] = await Promise.all([
-      api.get(`/candles?symbol=${state.symbol}&timeframe=1m${freshQ}`),
-      api.get(`/candles?symbol=${state.symbol}&timeframe=3m${freshQ}`),
-      api.get(`/candles?symbol=${state.symbol}&timeframe=5m${freshQ}`),
-      api.get(`/candles?symbol=${state.symbol}&timeframe=15m${freshQ}`),
-    ]);
+    const tfs = ['1m', '3m', '5m', '15m'];
+    const byTf = await Promise.all(
+      tfs.map(async (tf) => {
+        const useStrict = forceFresh && strictFresh && tf === state.timeframe;
+        try {
+          const strictQ = useStrict ? '&strict=1' : '';
+          const data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
+          return [tf, data];
+        } catch (error) {
+          if (useStrict) {
+            console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
+            const data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+            return [tf, data];
+          }
+          throw error;
+        }
+      }),
+    );
+    const candleMap = Object.fromEntries(byTf);
+    const candles1m = candleMap['1m'] || [];
+    const candles3m = candleMap['3m'] || [];
+    const candles5m = candleMap['5m'] || [];
+    const candles15m = candleMap['15m'] || [];
     const normalize = (c) => ({
       time: Number(c.time),
       open: Number(c.open),
@@ -1291,9 +1308,20 @@
     renderChart();
   }
 
-  async function loadSingleTimeframe(tf, forceFresh = false) {
+  async function loadSingleTimeframe(tf, forceFresh = false, strictFresh = false) {
     const freshQ = forceFresh ? '&fresh=1' : '';
-    const candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+    const strictQ = forceFresh && strictFresh ? '&strict=1' : '';
+    let candles = [];
+    try {
+      candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
+    } catch (error) {
+      if (forceFresh && strictFresh) {
+        console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
+        candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+      } else {
+        throw error;
+      }
+    }
     const normalized = normalizeCandles(
       candles.map((c) => ({
         time: Number(c.time),
@@ -1413,7 +1441,7 @@
             const syncKey = `${state.symbol}:${tf}:${candle.time}`;
             if (state.lastClosedSyncKey !== syncKey) {
               state.lastClosedSyncKey = syncKey;
-              loadSingleTimeframe(tf, false)
+              loadSingleTimeframe(tf, true, true)
                 .then(() => {
                   recalcDisplayCandles();
                   renderChart();
@@ -1489,7 +1517,7 @@
           const syncKey = `${state.symbol}:${tf}:${c.time}`;
           if (state.lastClosedSyncKey !== syncKey) {
             state.lastClosedSyncKey = syncKey;
-            loadSingleTimeframe(tf, false)
+            loadSingleTimeframe(tf, true, true)
               .then(() => {
                 recalcDisplayCandles();
                 renderChart();
@@ -1554,7 +1582,7 @@
     drawTradeZones(null);
     clearSupportResistanceVisuals();
     clearMaMiniTags();
-    await loadInitialCandles(true);
+    await loadInitialCandles(true, true);
     connectStream();
     connectDirectKlineStream();
     await refreshSignalStatus();
@@ -1569,7 +1597,7 @@
       closeDirectKlineStream();
       state.timeframe = e.target.value;
       try {
-        await loadSingleTimeframe(state.timeframe, true);
+        await loadSingleTimeframe(state.timeframe, true, true);
       } catch (error) {
         console.error('Không tải được nến fresh cho timeframe mới', error);
       }
@@ -1713,7 +1741,7 @@
     await bindActions();
     applyTimezoneToChart();
     await fetchGlossary();
-    await loadInitialCandles(true);
+    await loadInitialCandles(true, true);
     connectStream();
     await refreshSignalStatus();
     connectDirectKlineStream();
@@ -1750,7 +1778,9 @@
     setInterval(async () => {
       if (Date.now() - state.lastTickTs > 8000) {
         try {
-          await loadInitialCandles();
+          await loadSingleTimeframe(state.timeframe, true, true);
+          recalcDisplayCandles();
+          renderChart();
           await refreshSignalStatus();
         } catch (error) {
           console.error(error);
