@@ -110,6 +110,7 @@ const config = {
     intervalMs: toNumber(process.env.SELF_PING_INTERVAL_MS, 240000),
     retryMs: toNumber(process.env.SELF_PING_RETRY_MS, 5000),
     timeoutMs: toNumber(process.env.SELF_PING_TIMEOUT_MS, 4000),
+    preferLocal: process.env.SELF_PING_PREFER_LOCAL !== 'false',
     url: selfPingUrl,
   },
   security: {

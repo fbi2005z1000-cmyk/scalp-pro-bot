@@ -7,6 +7,7 @@ class SelfPingService {
     this.intervalMs = Number(config?.selfPing?.intervalMs) || 240000;
     this.retryMs = Number(config?.selfPing?.retryMs) || 5000;
     this.timeoutMs = Number(config?.selfPing?.timeoutMs) || 4000;
+    this.preferLocal = config?.selfPing?.preferLocal !== false;
     this.url = String(config?.selfPing?.url || '').trim();
     this.localFallbackUrl = `http://127.0.0.1:${Number(config?.app?.port) || 3000}/api/health`;
     this.timer = null;
@@ -26,6 +27,8 @@ class SelfPingService {
     this.stopped = false;
     this.logger.info('self-ping', 'Self-ping started', {
       url: this.url,
+      localUrl: this.localFallbackUrl,
+      preferLocal: this.preferLocal,
       intervalMs: this.intervalMs,
       retryMs: this.retryMs,
       timeoutMs: this.timeoutMs,
@@ -61,19 +64,22 @@ class SelfPingService {
     this.inFlight = true;
     const startedAt = Date.now();
     try {
-      const primary = await this.#request(this.url);
+      const firstUrl = this.preferLocal ? this.localFallbackUrl : this.url;
+      const secondUrl = this.preferLocal ? this.url : this.localFallbackUrl;
+
+      const primary = await this.#request(firstUrl);
       if (primary.ok) {
         this.okCount += 1;
         this.lastOkAt = new Date().toISOString();
         this.logger.info('self-ping', 'Ping success', {
           status: primary.status,
           latencyMs: primary.latencyMs,
-          via: 'primary',
+          via: this.preferLocal ? 'local' : 'public',
           okCount: this.okCount,
         });
         this.#schedule(this.intervalMs);
       } else {
-        const fallback = await this.#request(this.localFallbackUrl);
+        const fallback = await this.#request(secondUrl);
         if (fallback.ok) {
           this.okCount += 1;
           this.lastOkAt = new Date().toISOString();
@@ -81,6 +87,7 @@ class SelfPingService {
             primaryStatus: primary.status,
             fallbackStatus: fallback.status,
             fallbackLatencyMs: fallback.latencyMs,
+            via: this.preferLocal ? 'public-fallback' : 'local-fallback',
             okCount: this.okCount,
           });
           this.#schedule(this.intervalMs);
@@ -88,9 +95,9 @@ class SelfPingService {
           this.failCount += 1;
           this.logger.warn('self-ping', 'Ping HTTP error, retry in 5s', {
             primaryStatus: primary.status,
-            primaryUrl: this.url,
+            primaryUrl: firstUrl,
             fallbackStatus: fallback.status,
-            fallbackUrl: this.localFallbackUrl,
+            fallbackUrl: secondUrl,
             failCount: this.failCount,
             totalLatencyMs: Date.now() - startedAt,
           });
@@ -117,10 +124,11 @@ class SelfPingService {
       const resp = await axios.get(url, {
         timeout: this.timeoutMs,
         validateStatus: () => true,
+        maxRedirects: 5,
         headers: { 'x-self-ping': '1' },
       });
       return {
-        ok: resp.status >= 200 && resp.status < 300,
+        ok: resp.status >= 200 && resp.status < 400,
         status: resp.status,
         latencyMs: Date.now() - startedAt,
       };
