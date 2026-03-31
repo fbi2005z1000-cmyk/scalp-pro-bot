@@ -42,6 +42,9 @@
     directKlineWs: null,
     directKlineToken: 0,
     directKlineConnected: false,
+    fleetHydrationInProgress: false,
+    fleetHydrationDone: false,
+    fleetHydrationAt: 0,
     lastFullRenderAt: 0,
     snapshotMode: new URLSearchParams(window.location.search).get('snapshot') === '1',
     adminToken: localStorage.getItem('ADMIN_TOKEN') || '',
@@ -975,8 +978,24 @@
         return a.distance - b.distance;
       });
 
-    if (!candidates.length) return null;
-    const picked = candidates[0];
+    const picked = candidates.length
+      ? candidates[0]
+      : (() => {
+          if (!(priceNow > 0)) return null;
+          const local = getLatestIndicatorSnapshot();
+          const ma7 = Number(local.ma7 || 0);
+          const ma25 = Number(local.ma25 || 0);
+          const sideByMa = ma7 > 0 && ma25 > 0 && ma7 >= ma25 ? 'LONG' : 'SHORT';
+          return {
+            price: priceNow,
+            side: sideByMa,
+            score: 55,
+            distance: 0,
+            mode: 'MA_HINT',
+          };
+        })();
+
+    if (!picked) return null;
     const atr = Number(state.signal?.market?.atr2m || 0);
     const riskDistance = Math.max(
       picked.price * 0.0014,
@@ -1281,6 +1300,10 @@
       : 'N/A';
     const preTriggerText = pre ? formatNum(pre.triggerPrice, 2) : 'N/A';
     const preEtaText = pre ? formatEtaSec(pre.etaSec) : 'N/A';
+    const planStopLoss = hasNum(signal.stopLoss) ? signal.stopLoss : state.entryHint?.stopLoss;
+    const planTp1 = hasNum(signal.tp1) ? signal.tp1 : state.entryHint?.tp1;
+    const planTp2 = hasNum(signal.tp2) ? signal.tp2 : state.entryHint?.tp2;
+    const planTp3 = hasNum(signal.tp3) ? signal.tp3 : state.entryHint?.tp3;
 
     const rows = [
       ['Confidence', `${formatNum(signal.confidence, 0)}/100`, 'CONFIDENCE'],
@@ -1289,10 +1312,10 @@
       ['Regime', signal.volatilityRegime || market.volatilityRegime || 'N/A', 'VOLUME'],
       ['Session', signal.session || market.session || 'N/A', 'VOLUME'],
       ['Entry', entryText, 'ENTRY'],
-      ['SL', formatNum(signal.stopLoss), 'SL'],
-      ['TP1', formatNum(signal.tp1), 'TP'],
-      ['TP2', formatNum(signal.tp2), 'TP'],
-      ['TP3', formatNum(signal.tp3), 'TP'],
+      ['SL', formatNum(planStopLoss), 'SL'],
+      ['TP1', formatNum(planTp1), 'TP'],
+      ['TP2', formatNum(planTp2), 'TP'],
+      ['TP3', formatNum(planTp3), 'TP'],
       ['RR', formatNum(signal.rr), 'RR'],
       [
         `ATR % (${analysisTf})`,
@@ -1597,6 +1620,53 @@
     }
   }
 
+  async function hydrateScannerUniverseFromClient(status) {
+    if (state.fleetHydrationInProgress) return;
+    const symbols = Array.isArray(status?.scanner?.symbols)
+      ? status.scanner.symbols.map((s) => String(s || '').toUpperCase()).filter(Boolean)
+      : [];
+    if (!symbols.length) return;
+
+    const now = Date.now();
+    if (state.fleetHydrationDone && now - state.fleetHydrationAt < 10 * 60 * 1000) {
+      return;
+    }
+
+    state.fleetHydrationInProgress = true;
+    const tfs = ['1m', '3m', '5m', '15m'];
+    const batchSize = 5;
+
+    try {
+      for (let i = 0; i < symbols.length; i += batchSize) {
+        const batch = symbols.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(async (symbol) => {
+            for (const tf of tfs) {
+              try {
+                const direct = await fetchBinanceKlinesDirect(symbol, tf, 700);
+                if (Array.isArray(direct) && direct.length >= 80) {
+                  await hydrateCandlesToBackend(symbol, tf, direct);
+                }
+              } catch (error) {
+                console.warn(`hydrate fleet lỗi ${symbol} ${tf}`, error);
+              }
+            }
+          }),
+        );
+        if (i + batchSize < symbols.length) {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+      }
+      state.fleetHydrationDone = true;
+      state.fleetHydrationAt = Date.now();
+      setTimeout(() => {
+        refreshSignalStatus().catch(() => {});
+      }, 350);
+    } finally {
+      state.fleetHydrationInProgress = false;
+    }
+  }
+
   async function loadCandlesPrimary(tf, forceFresh = false, strictFresh = false) {
     const freshQ = forceFresh ? '&fresh=1' : '';
     const useStrict = forceFresh && strictFresh;
@@ -1717,6 +1787,9 @@
       state.status = status;
       state.stats = stats;
       syncSymbolSelectFromStatus(status);
+      hydrateScannerUniverseFromClient(status).catch((error) =>
+        console.warn('hydrate scanner universe lỗi', error),
+      );
       if (status.priceSource) {
         state.priceSource = status.priceSource;
         el.priceSourceSelect.value = status.priceSource;

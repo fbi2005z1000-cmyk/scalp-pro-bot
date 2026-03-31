@@ -1,5 +1,6 @@
 ﻿const axios = require('axios');
 const EventEmitter = require('events');
+const WebSocket = require('ws');
 const SignalEngine = require('./signalEngine');
 const { BOT_STATES } = require('./stateStore');
 
@@ -195,6 +196,7 @@ class BotEngine {
     await this.bootstrapScannerSymbols();
     this.bindWebsocket();
     this.websocketManager.connect(this.stateStore.state.symbol);
+    this.connectScannerMarketStream();
     this.startMultiSymbolScanner();
     this.startDirectBotWatchdog();
   }
@@ -1031,6 +1033,11 @@ class BotEngine {
     if (!this.config.binance.directBotWatchdogEnabled) return;
 
     const watchdogMs = Math.max(5000, Number(this.config.binance.directBotWatchdogMs || 15000));
+    setTimeout(() => {
+      this.recoverInactiveDirectBots().catch((error) => {
+        this.logger.warn('bot', 'Watchdog warmup lỗi', { error: error.message });
+      });
+    }, 1200);
     this.directBotWatchdogTimer = setInterval(() => {
       this.recoverInactiveDirectBots().catch((error) => {
         this.logger.warn('bot', 'Watchdog direct bots lỗi', { error: error.message });
@@ -1042,6 +1049,190 @@ class BotEngine {
     if (!this.directBotWatchdogTimer) return;
     clearInterval(this.directBotWatchdogTimer);
     this.directBotWatchdogTimer = null;
+  }
+
+  buildScannerWsUrl() {
+    const symbols = this.getScannerSymbols();
+    const tfs = this.getScannerTimeframes();
+    const streams = [];
+    for (const symbol of symbols) {
+      const s = String(symbol || '').toLowerCase();
+      if (!s) continue;
+      for (const tf of tfs) {
+        streams.push(`${s}@kline_${tf}`);
+      }
+    }
+    const base = String(this.config.binance.wsBaseUrl || '');
+    const sep = base.includes('?') ? '&' : '?';
+    return `${base}${sep}streams=${streams.join('/')}`;
+  }
+
+  connectScannerMarketStream() {
+    if (!this.config.binance.scannerEnabled) return;
+    const symbols = this.getScannerSymbols();
+    if (!symbols.length) return;
+
+    this.scannerWsManualClose = false;
+    if (this.scannerWs) {
+      try {
+        this.scannerWs.close();
+      } catch (_) {
+        // ignore
+      }
+      this.scannerWs = null;
+    }
+
+    const url = this.buildScannerWsUrl();
+    this.scannerWs = new WebSocket(url);
+
+    this.scannerWs.on('open', () => {
+      this.scannerWsConnected = true;
+      this.scannerWsReconnectAttempt = 0;
+      this.scannerWsLastMessageAt = Date.now();
+      this.logger.info('scanner-ws', 'Đã kết nối scanner WS đa coin', {
+        symbols: symbols.length,
+        timeframes: this.getScannerTimeframes(),
+      });
+      this.emitEvent('status', this.getStatus());
+    });
+
+    this.scannerWs.on('message', (raw) => {
+      this.scannerWsLastMessageAt = Date.now();
+      this.handleScannerWsMessage(String(raw || ''));
+    });
+
+    this.scannerWs.on('close', () => {
+      this.scannerWsConnected = false;
+      this.emitEvent('status', this.getStatus());
+      if (!this.scannerWsManualClose) {
+        this.scheduleScannerWsReconnect();
+      }
+    });
+
+    this.scannerWs.on('error', (error) => {
+      this.logger.warn('scanner-ws', 'Scanner WS lỗi', { error: error.message });
+    });
+  }
+
+  scheduleScannerWsReconnect() {
+    this.scannerWsReconnectAttempt += 1;
+    const delay = Math.min(2000 * this.scannerWsReconnectAttempt, 20000);
+    setTimeout(() => {
+      if (!this.scannerWsManualClose) {
+        this.connectScannerMarketStream();
+      }
+    }, delay);
+  }
+
+  handleScannerWsMessage(payload) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(payload);
+    } catch (_) {
+      return;
+    }
+    const stream = String(parsed?.stream || '');
+    const body = parsed?.data;
+    if (!stream || !body) return;
+
+    const match = stream.match(/@kline_(\d+m)$/);
+    if (!match) return;
+    const timeframe = match[1];
+    const k = body.k;
+    if (!k) return;
+
+    const symbol = String(k.s || body.s || stream.split('@')[0] || '').toUpperCase();
+    if (!symbol) return;
+
+    const candle = {
+      symbol,
+      time: Math.floor(Number(k.t) / 1000),
+      open: Number(k.o),
+      high: Number(k.h),
+      low: Number(k.l),
+      close: Number(k.c),
+      volume: Number(k.v),
+      closeTime: Number(k.T),
+      isClosed: Boolean(k.x),
+      eventTime: Number(body.E || 0),
+      latencyMs: body.E ? Date.now() - Number(body.E) : 0,
+      timeframe,
+    };
+    if (!Number.isFinite(candle.time)) return;
+
+    this.stateStore.addCandle(symbol, timeframe, candle, this.config.timeframe.limit);
+    this.setDirectBotState(symbol, {
+      state: 'STREAMING',
+      lastRunAt: Date.now(),
+      lastError: null,
+    });
+
+    if (candle.isClosed) {
+      this.scanDirectSymbolFromState(symbol, {
+        source: 'SCANNER_WS',
+        timeframes: [timeframe],
+        dispatchSignals: true,
+      }).catch((error) => {
+        this.logger.warn('scanner-ws', 'Lỗi scan từ scanner WS', {
+          symbol,
+          timeframe,
+          error: error.message,
+        });
+      });
+    }
+  }
+
+  async scanDirectSymbolFromState(symbol, options = {}) {
+    const tfs = Array.isArray(options.timeframes) && options.timeframes.length
+      ? options.timeframes
+      : this.getScannerTimeframes();
+    const dispatchSignals = options.dispatchSignals !== false;
+    const forceAnalyze = options.forceAnalyze === true;
+
+    const byTf = {
+      '1m': this.stateStore.getCandles(symbol, '1m'),
+      '3m': this.stateStore.getCandles(symbol, '3m'),
+      '5m': this.stateStore.getCandles(symbol, '5m'),
+      '15m': this.stateStore.getCandles(symbol, '15m'),
+    };
+
+    let analyzed = false;
+    for (const tf of tfs) {
+      const tfCandles = byTf[tf] || [];
+      const closed = tfCandles.filter((c) => c.isClosed);
+      if (!closed.length) continue;
+      const lastClosed = closed[closed.length - 1];
+      const closeKey = `${symbol}:${tf}`;
+      const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
+      if (!forceAnalyze && lastClosed.time <= prevClose) continue;
+      this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+
+      const signal = this.signalEngine.analyze({
+        symbol,
+        candles1m: byTf['1m'] || [],
+        candles2m: byTf[tf] || [],
+        candles5m: byTf['5m'] || [],
+        candles15m: byTf['15m'] || [],
+        orderBook: this.stateStore.state.orderBook,
+        analysisTimeframe: tf,
+      });
+
+      this.stateStore.setMarket(symbol, signal.market || {});
+      this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
+      await this.notifyPreSignal(signal, tf, lastClosed.time);
+      if (dispatchSignals) {
+        await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
+      }
+      analyzed = true;
+    }
+
+    if (!analyzed) {
+      this.setDirectBotState(symbol, {
+        inFlight: false,
+        state: 'IDLE',
+        lastRunAt: Date.now(),
+      });
+    }
   }
 
   runTotalBrainGate(signal, timeframe) {
@@ -1216,8 +1407,8 @@ class BotEngine {
     if (!this.config.binance.scannerEnabled) return;
     if (!this.config.binance.directBotWatchdogEnabled) return;
     if (this.multiScanInFlight) return;
-    if (Date.now() < this.restBlockedUntil) return;
-    if (Date.now() < this.restGeoBlockedUntil) return;
+    if (Date.now() < this.restBlockedUntil && !this.scannerWsConnected) return;
+    if (Date.now() < this.restGeoBlockedUntil && !this.scannerWsConnected) return;
 
     this.directBotLastWatchdogAt = Date.now();
     if (!this.multiScanTimer) {
@@ -1234,10 +1425,18 @@ class BotEngine {
 
     await Promise.allSettled(
       targets.map(async (symbol) => {
-        await this.scanDirectSymbol(symbol, {
-          source: 'WATCHDOG',
-          dispatchSignals: true,
-        });
+        if (this.scannerWsConnected) {
+          await this.scanDirectSymbolFromState(symbol, {
+            source: 'WATCHDOG_STATE',
+            dispatchSignals: true,
+            forceAnalyze: true,
+          });
+        } else {
+          await this.scanDirectSymbol(symbol, {
+            source: 'WATCHDOG',
+            dispatchSignals: true,
+          });
+        }
       }),
     );
     this.emitEvent('status', this.getStatus());
@@ -1246,6 +1445,33 @@ class BotEngine {
   async runMultiSymbolScan() {
     if (this.multiScanInFlight) return;
     if (!this.config.binance.scannerEnabled) return;
+    const scannerWsFresh =
+      this.scannerWsConnected &&
+      this.scannerWsLastMessageAt > 0 &&
+      Date.now() - this.scannerWsLastMessageAt < Math.max(15000, this.getDirectBotStaleMs());
+    if (scannerWsFresh) {
+      const symbolsAll = this.getScannerSymbols();
+      if (!symbolsAll.length) return;
+      const configuredBatch = Math.max(1, Number(this.config.binance.scannerBatchSize || 2));
+      const batchSize = Math.min(configuredBatch, symbolsAll.length);
+      const start = this.multiScanCursor % symbolsAll.length;
+      const symbols = [];
+      for (let i = 0; i < batchSize; i += 1) {
+        symbols.push(symbolsAll[(start + i) % symbolsAll.length]);
+      }
+      this.multiScanCursor = (start + batchSize) % symbolsAll.length;
+      await Promise.allSettled(
+        symbols.map(async (symbol) => {
+          await this.scanDirectSymbolFromState(symbol, {
+            source: 'SCANNER_STATE',
+            dispatchSignals: true,
+            forceAnalyze: false,
+          });
+        }),
+      );
+      this.emitEvent('status', this.getStatus());
+      return;
+    }
     if (Date.now() < this.restBlockedUntil) return;
     if (Date.now() < this.restGeoBlockedUntil) return;
     this.multiScanInFlight = true;
@@ -2025,6 +2251,8 @@ class BotEngine {
         watchdogEnabled: this.config.binance.directBotWatchdogEnabled,
         watchdogMs: this.config.binance.directBotWatchdogMs,
         staleMs: health.staleMs,
+        wsConnected: this.scannerWsConnected,
+        wsLastMessageAt: this.scannerWsLastMessageAt,
         timeframes: this.getScannerTimeframes(),
         symbols: scannerSymbols,
         symbolCount: scannerSymbols.length,
@@ -2077,3 +2305,5 @@ class BotEngine {
 }
 
 module.exports = BotEngine;
+
+
