@@ -179,6 +179,9 @@ function validateCoreConfig(config) {
   if (!Number.isFinite(ws.maxReconnectAttempts) || ws.maxReconnectAttempts < 1) {
     errors.push('websocket.maxReconnectAttempts phai >= 1');
   }
+  if (!Number.isFinite(ws.maxBookLatencyMs) || ws.maxBookLatencyMs < 1000) {
+    errors.push('websocket.maxBookLatencyMs phai >= 1000');
+  }
 
   const sp = config.selfPing || {};
   if (sp.enabled) {

@@ -165,6 +165,7 @@ const config = {
     heartbeatIntervalMs: toNumber(process.env.WS_HEARTBEAT_INTERVAL_MS, 4000),
     maxReconnectAttempts: toNumber(process.env.WS_MAX_RECONNECT_ATTEMPTS, 10),
     circuitCooldownMs: toNumber(process.env.WS_CIRCUIT_COOLDOWN_MS, 45000),
+    maxBookLatencyMs: toNumber(process.env.WS_MAX_BOOK_LATENCY_MS, 15000),
   },
   persistence: {
     enabled: process.env.PERSISTENCE_ENABLED !== 'false',

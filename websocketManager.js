@@ -12,8 +12,10 @@ class WebsocketManager {
     this.manualClose = false;
     this.lastMessageAt = 0;
     this.lastPongAt = 0;
+    this.lastBookAt = 0;
     this.staleStrikeCount = 0;
     this.pongStrikeCount = 0;
+    this.bookStaleStrikeCount = 0;
     this.lastKlineTimeByTf = {};
     this.heartbeatTimer = null;
     this.circuitOpenUntil = 0;
@@ -95,8 +97,10 @@ class WebsocketManager {
       this.reconnectAttempt = 0;
       this.lastMessageAt = Date.now();
       this.lastPongAt = Date.now();
+      this.lastBookAt = Date.now();
       this.staleStrikeCount = 0;
       this.pongStrikeCount = 0;
+      this.bookStaleStrikeCount = 0;
       this.logger.info('websocket', 'Đã kết nối Binance WS', { symbol });
       this.startHeartbeat();
     });
@@ -175,6 +179,7 @@ class WebsocketManager {
     this.clearHeartbeat();
     const tick = Math.max(1200, this.config.websocket.heartbeatIntervalMs);
     const staleMs = Math.max(3000, this.config.websocket.staleDataMs);
+    const maxBookLatencyMs = Math.max(staleMs, this.config.websocket.maxBookLatencyMs || 15000);
 
     this.heartbeatTimer = setInterval(() => {
       const now = Date.now();
@@ -203,6 +208,33 @@ class WebsocketManager {
         return;
       }
       this.staleStrikeCount = 0;
+
+      const bookStaleFor = now - this.lastBookAt;
+      if (this.lastBookAt > 0 && bookStaleFor > maxBookLatencyMs) {
+        this.bookStaleStrikeCount += 1;
+        const shouldReconnectBook = this.bookStaleStrikeCount >= 3;
+        this.emit('stale', {
+          symbol: this.symbol,
+          type: 'book',
+          staleForMs: bookStaleFor,
+          staleDataMs: maxBookLatencyMs,
+          strike: this.bookStaleStrikeCount,
+          shouldReconnect: shouldReconnectBook,
+        });
+        if (shouldReconnectBook) {
+          this.logger.warn('websocket', 'bookTicker stale liên tiếp, tự reconnect', {
+            symbol: this.symbol,
+            staleForMs: bookStaleFor,
+            strike: this.bookStaleStrikeCount,
+            maxBookLatencyMs,
+          });
+          this.bookStaleStrikeCount = 0;
+          this.ws.terminate();
+          return;
+        }
+      } else {
+        this.bookStaleStrikeCount = 0;
+      }
 
       try {
         this.ws.ping();
@@ -274,6 +306,7 @@ class WebsocketManager {
       }
 
       if (stream.endsWith('@bookTicker')) {
+        this.lastBookAt = Date.now();
         const bestBid = Number(body.b);
         const bestAsk = Number(body.a);
         const spreadPct = bestAsk > 0 ? (bestAsk - bestBid) / bestAsk : 0;
@@ -309,6 +342,8 @@ class WebsocketManager {
       }
 
       if (stream.includes('@markPrice')) {
+        // markPrice@1s is a fallback heartbeat source for market stream health.
+        this.lastBookAt = Math.max(this.lastBookAt, Date.now());
         const markPrice = Number(body.p || 0);
         const markPayload = {
           symbol: String(body.s || streamSymbol || this.symbol).toUpperCase(),
