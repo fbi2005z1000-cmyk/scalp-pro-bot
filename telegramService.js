@@ -709,6 +709,36 @@ class TelegramService {
     });
   }
 
+  async sendPreSignalCancel(cancelData) {
+    if (!this.config.sendSignal) return;
+    if (!this.config.preSignalEnabled) return;
+    const symbol = String(cancelData.symbol || '').toUpperCase();
+    if (!symbol) return;
+    const side = String(cancelData.side || '').toUpperCase();
+    const sideIcon = side === 'LONG' ? '🟢' : side === 'SHORT' ? '🔴' : '⚪';
+    const coinIcon = this.getSymbolIcon(symbol);
+    const botBadge = this.getBotBadge({ symbol });
+    const reason = this.normalizeReasonText(cancelData.reason || 'Setup không còn hợp lệ');
+    const step = Number.isFinite(Number(cancelData.countdownStep)) ? Number(cancelData.countdownStep) : null;
+    const stepText = step === null ? 'N/A' : step <= 0 ? '0' : String(step);
+    const tf = String(cancelData.timeframe || '3m');
+
+    const text = [
+      `${botBadge}`,
+      `🚫 <b>HỦY KÈO PRE-SIGNAL</b> | ${sideIcon} <b>${side || 'N/A'}</b> | ${coinIcon} <b>${esc(symbol)}</b> | <b>${esc(tf)}</b>`,
+      `⏳ Countdown trước hủy: <b>${esc(stepText)}</b> nến`,
+      `Lý do: <b>${esc(reason)}</b>`,
+      `📌 Trạng thái: chờ setup mới, không vào lệnh.`,
+    ].join('\n');
+
+    const idem = `pre-cancel:${symbol}:${tf}:${side}:${stepText}:${cancelData.candleTime || 0}`;
+    await this.sendText(text, {
+      idempotencyKey: idem,
+      idempotencyTtlMs: 60000,
+      symbol,
+    });
+  }
+
   async sendSignal(signalData, imagePath = null) {
     if (!this.config.sendSignal) return;
     const market = signalData.market || {};
@@ -782,7 +812,7 @@ class TelegramService {
     const text = [
       `${botBadge}`,
       `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(signalData.symbol)}</b>`,
-      `${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
+      `✅ <b>ENTRY CONFIRM</b> | ${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
       ``,
       `📍 <b>Vùng vào:</b> ${fmtPrice(entryMin)} - ${fmtPrice(entryMax)}`,
       `🛑 <b>Cắt lỗ:</b> ${fmtPrice(signalData.stopLoss)}`,
@@ -793,6 +823,7 @@ class TelegramService {
       `⚙️ <b>Đòn bẩy:</b> x${Number.isFinite(leverage) && leverage > 0 ? leverage.toFixed(0) : '10'}`,
       `📊 <b>Confidence:</b> ${Number(signalData.confidence || 0)}/100`,
       `${sideMeta.trendIcon} <b>Trend 5m:</b> ${esc(trendVi)}`,
+      signalData.entryConfirmReason ? `🧩 <b>Xác nhận:</b> ${esc(String(signalData.entryConfirmReason))}` : '',
       ``,
       `✅ <b>Lý do vào:</b>`,
       ...reasonLines,

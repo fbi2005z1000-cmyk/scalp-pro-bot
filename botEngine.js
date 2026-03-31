@@ -470,7 +470,7 @@ class BotEngine {
           this.restGeoBlockedUntil = Math.max(this.restGeoBlockedUntil, now + blockMs);
           if (now - this.restGeoNotifiedAt > 60 * 60 * 1000) {
             this.restGeoNotifiedAt = now;
-            this.logger.warn('bot', 'REST Binance bị chặn theo region/chính sách, tự chuyển WS + cache', {
+            this.logger.info('bot', 'REST Binance bị chặn theo region/chính sách, tự chuyển WS + cache', {
               status: this.getHttpStatus(error),
               blockMs,
               blockedUntil: this.restGeoBlockedUntil,
@@ -763,6 +763,110 @@ class BotEngine {
     return `${signal.symbol}:${timeframe}:${pre.side}:${band}`;
   }
 
+  findRecentPreCampaign(symbol, timeframe, side) {
+    const prefix = `${symbol}:${timeframe}:${side}:`;
+    const now = Date.now();
+    let best = null;
+    for (const [key, campaign] of this.preSignalCountdownMap.entries()) {
+      if (!key.startsWith(prefix)) continue;
+      if (!campaign || campaign.cancelledAt || campaign.confirmedAt) continue;
+      const ts = Number(campaign.lastSentAt || 0);
+      if (!ts) continue;
+      if (now - ts > 3 * 60 * 1000) continue;
+      if (!best || ts > Number(best.campaign.lastSentAt || 0)) {
+        best = { key, campaign };
+      }
+    }
+    return best;
+  }
+
+  shouldSendEntryConfirm(signal, timeframe) {
+    if (!signal || signal.side === 'NO_TRADE') {
+      return { ok: false, reason: 'NO_ACTIONABLE_SIGNAL' };
+    }
+    const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
+    const side = String(signal.side || '').toUpperCase();
+    const pre = signal.preSignal?.selected || null;
+    const tfSec = this.timeframeToSec(tf);
+
+    if (pre && String(pre.side || '').toUpperCase() === side) {
+      const remain = Math.max(0, Math.ceil(Number(pre.etaSec || 0) / tfSec));
+      if (remain <= 1) {
+        return { ok: true, reason: 'PRE_COUNTDOWN_READY', remainingCandles: remain };
+      }
+      return { ok: false, reason: 'WAIT_PRE_COUNTDOWN', remainingCandles: remain };
+    }
+
+    const recent = this.findRecentPreCampaign(signal.symbol, tf, side);
+    if (recent && Number(recent.campaign.lastStep || 9) <= 1) {
+      return { ok: true, reason: 'PRE_COUNTDOWN_RECENT_READY', remainingCandles: recent.campaign.lastStep };
+    }
+
+    if (
+      String(signal.level || '').toUpperCase() === 'STRONG' &&
+      Number(signal.confidence || 0) >= Number(this.config.trading.autoThreshold || 75) + 2
+    ) {
+      return { ok: true, reason: 'STRONG_FALLBACK_CONFIRM', remainingCandles: null };
+    }
+
+    return { ok: false, reason: 'NO_PRE_CONFIRM_WINDOW' };
+  }
+
+  markPreCampaignConfirmed(signal, timeframe, candleTime) {
+    if (!signal || signal.side === 'NO_TRADE') return;
+    const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
+    const side = String(signal.side || '').toUpperCase();
+    const now = Date.now();
+    const recent = this.findRecentPreCampaign(signal.symbol, tf, side);
+    if (!recent) return;
+    this.preSignalCountdownMap.set(recent.key, {
+      ...recent.campaign,
+      confirmedAt: now,
+      confirmCandleTime: Number(candleTime || 0),
+    });
+  }
+
+  async notifyPreSignalCancelIfNeeded(signal, timeframe, candleTime) {
+    if (!this.config.telegram.preSignalEnabled) return;
+    const tf = timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m';
+    const symbol = String(signal?.symbol || '').toUpperCase();
+    if (!symbol) return;
+    const now = Date.now();
+    const prefix = `${symbol}:${tf}:`;
+
+    for (const [key, campaign] of this.preSignalCountdownMap.entries()) {
+      if (!key.startsWith(prefix)) continue;
+      if (!campaign || campaign.cancelledAt || campaign.confirmedAt) continue;
+      const lastSentAt = Number(campaign.lastSentAt || 0);
+      if (!lastSentAt || now - lastSentAt > 3 * 60 * 1000) continue;
+
+      let cancelReason = null;
+      if (!signal || signal.side === 'NO_TRADE') {
+        const rejectCode = String(signal?.rejectCode || signal?.rejectCodes?.[0] || 'NO_TRADE').toUpperCase();
+        if (['SIDEWAY', 'LOW_CONFIDENCE', 'BAD_RR', 'HIGH_SPREAD', 'HIGH_SLIPPAGE', 'NO_TRADE'].includes(rejectCode)) {
+          cancelReason = `Hủy kèo: điều kiện thị trường đổi (${rejectCode})`;
+        }
+      } else if (String(signal.side || '').toUpperCase() !== String(campaign.side || '').toUpperCase()) {
+        cancelReason = `Hủy kèo: tín hiệu đảo chiều sang ${signal.side}`;
+      }
+
+      if (!cancelReason) continue;
+      await this.telegramService.sendPreSignalCancel({
+        symbol,
+        timeframe: tf,
+        side: campaign.side,
+        reason: cancelReason,
+        countdownStep: Number(campaign.lastStep || 0),
+        candleTime,
+      });
+      this.preSignalCountdownMap.set(key, {
+        ...campaign,
+        cancelledAt: now,
+        cancelReason,
+      });
+    }
+  }
+
   calculatePreSignalLiveStats(signal, pre) {
     const trigger = Number(pre.triggerPrice || 0);
     const sl = Number(pre.stopLoss || 0);
@@ -911,9 +1015,15 @@ class BotEngine {
     });
 
     this.preSignalCountdownMap.set(campaignKey, {
+      symbol: signal.symbol,
+      timeframe: tf,
+      side: pre.side,
+      triggerPrice: Number(pre.triggerPrice || 0),
       lastStep: step,
       lastSentAt: now,
       lastCandleTime: Number(candleTime || 0),
+      cancelledAt: null,
+      confirmedAt: null,
     });
   }
 
@@ -945,6 +1055,7 @@ class BotEngine {
     });
 
     await this.notifyPreSignal(tfSignal, timeframe, candleTime);
+    await this.notifyPreSignalCancelIfNeeded(tfSignal, timeframe, candleTime);
   }
 
   getScannerSymbols() {
@@ -1374,6 +1485,7 @@ class BotEngine {
       this.stateStore.setMarket(symbol, signal.market || {});
       this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
       await this.notifyPreSignal(signal, tf, lastClosed.time);
+      await this.notifyPreSignalCancelIfNeeded(signal, tf, lastClosed.time);
       if (dispatchSignals) {
         await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
       }
@@ -1420,6 +1532,8 @@ class BotEngine {
   async dispatchActionableScanSignal(signal, timeframe, candleTime) {
     if (!signal || signal.side === 'NO_TRADE') return;
     if (signal.confidence < this.config.trading.signalThreshold) return;
+    const entryGate = this.shouldSendEntryConfirm(signal, timeframe);
+    if (!entryGate.ok) return;
     const totalGate = this.runTotalBrainGate(signal, timeframe);
     if (!totalGate.ok) return;
     const feeRates = await this.orderManager.getFeeRates(signal.symbol);
@@ -1455,9 +1569,12 @@ class BotEngine {
       }
     }
 
+    this.markPreCampaignConfirmed(signal, timeframe, candleTime);
     await this.telegramService.sendSignal({
       ...signal,
       signalTimeframe: timeframe,
+      entryConfirm: true,
+      entryConfirmReason: entryGate.reason,
       source: 'MULTI_SCANNER',
     });
   }
@@ -1539,6 +1656,7 @@ class BotEngine {
       this.stateStore.setMarket(symbol, signal.market || {});
       this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
       await this.notifyPreSignal(signal, tf, lastClosed.time);
+      await this.notifyPreSignalCancelIfNeeded(signal, tf, lastClosed.time);
       if (dispatchSignals) {
         await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
       }
@@ -1955,6 +2073,7 @@ class BotEngine {
         });
 
         await this.notifyPreSignal(signal, analysisTf, candle.time);
+        await this.notifyPreSignalCancelIfNeeded(signal, analysisTf, candle.time);
 
         const hasNetPositiveTp1 = (() => {
           const entry = Number(signal.entryPrice || 0);
@@ -1971,11 +2090,24 @@ class BotEngine {
           signal.confidence >= this.config.trading.signalThreshold &&
           hasNetPositiveTp1
         ) {
-          let snapshotPath = null;
-          if (signal.level === 'STRONG' && this.config.chartSnapshot.sendOnStrongSignal) {
-            snapshotPath = await this.chartSnapshot.capture(signal, 'strong-signal');
+          const entryGate = this.shouldSendEntryConfirm(signal, analysisTf);
+          if (!entryGate.ok) {
+            this.logger.info('signal', 'Chờ ENTRY CONFIRM, chưa gửi lệnh', {
+              symbol: signal.symbol,
+              side: signal.side,
+              confidence: signal.confidence,
+              reason: entryGate.reason,
+            });
+          } else {
+            this.markPreCampaignConfirmed(signal, analysisTf, candle.time);
+            signal.entryConfirm = true;
+            signal.entryConfirmReason = entryGate.reason;
+            let snapshotPath = null;
+            if (signal.level === 'STRONG' && this.config.chartSnapshot.sendOnStrongSignal) {
+              snapshotPath = await this.chartSnapshot.capture(signal, 'strong-signal');
+            }
+            await this.telegramService.sendSignal(signal, snapshotPath);
           }
-          await this.telegramService.sendSignal(signal, snapshotPath);
         }
 
         this.emitEvent('signal', signal);
