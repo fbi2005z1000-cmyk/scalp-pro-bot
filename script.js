@@ -1642,14 +1642,15 @@
 
     el.sendTelegramTestBtn.addEventListener('click', async () => {
       const oldText = el.sendTelegramTestBtn.textContent;
+      const diceValue = el.telegramDiceSelect.value || '';
       const payload = {
         message: String(el.telegramTestInput.value || '').trim(),
         route: el.telegramRouteSelect.value || 'ALL',
         symbol: state.symbol,
         sticker: String(el.telegramStickerInput.value || '').trim(),
         animation: String(el.telegramAnimationInput.value || '').trim(),
-        diceEmoji: el.telegramDiceSelect.value || '',
       };
+      if (diceValue) payload.diceEmoji = diceValue;
 
       el.sendTelegramTestBtn.disabled = true;
       el.sendTelegramTestBtn.textContent = 'Đang gửi...';

@@ -86,7 +86,8 @@ function validateTelegramTestBody(body) {
 
   if (body.diceEmoji !== undefined) {
     const allowedDice = ['🎲', '🎯', '🏀', '⚽', '🎳', '🎰'];
-    if (typeof body.diceEmoji !== 'string' || !allowedDice.includes(body.diceEmoji)) {
+    const diceEmoji = String(body.diceEmoji || '').trim();
+    if (diceEmoji && !allowedDice.includes(diceEmoji)) {
       errors.push(toError('diceEmoji chi nhan 🎲 🎯 🏀 ⚽ 🎳 🎰', 'diceEmoji'));
     }
   }
