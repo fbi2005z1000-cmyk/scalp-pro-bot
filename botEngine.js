@@ -59,6 +59,7 @@ class BotEngine {
     this.positionPulseEndAt = 0;
     this.positionPulseLastPrice = null;
     this.positionPulseEndedPositionId = null;
+    this.positionStopRiskNotifyMap = new Map();
     this.restBlockedUntil = 0;
     this.restBlockedReason = null;
     this.lastRestBlockLogAt = 0;
@@ -1803,6 +1804,71 @@ class BotEngine {
     return Math.max(8, Math.min(98, probability));
   }
 
+  calcStopRiskSnapshot(position, currentPrice, probability, direction) {
+    const entry = Number(position.entryPrice || 0);
+    const stop = Number(position.stopLoss || 0);
+    if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(stop) || !Number.isFinite(currentPrice)) {
+      return null;
+    }
+
+    const side = String(position.side || '').toUpperCase();
+    const sideSign = side === 'LONG' ? 1 : -1;
+    const riskDistance = Math.max(Math.abs(entry - stop), entry * 0.0008);
+    const distanceToStop = sideSign * (currentPrice - stop);
+    const distanceRatio = distanceToStop / riskDistance;
+    const riskUsedPct = Math.max(0, Math.min(200, (1 - distanceRatio) * 100));
+
+    const adverseMove = sideSign * (currentPrice - entry) < 0;
+    const directionAgainst = (side === 'LONG' && direction === 'DOWN') || (side === 'SHORT' && direction === 'UP');
+    const safeProbability = Math.max(0, Math.min(100, Number(probability || 0)));
+    const stopRiskPct = Math.max(
+      0,
+      Math.min(
+        99,
+        riskUsedPct * 0.72 +
+          (100 - safeProbability) * 0.34 +
+          (adverseMove ? 8 : 0) +
+          (directionAgainst ? 6 : 0),
+      ),
+    );
+
+    const reasons = [];
+    if (riskUsedPct >= 70) reasons.push('Giá đang tiến sâu về vùng SL');
+    if (safeProbability <= 45) reasons.push('Xác suất an toàn realtime giảm thấp');
+    if (directionAgainst) reasons.push('Nhịp giá hiện tại đang đi ngược hướng lệnh');
+
+    return {
+      stopRiskPct,
+      riskUsedPct,
+      reason: reasons.length ? reasons.join(' | ') : 'Biến động bất lợi tăng gần vùng SL',
+    };
+  }
+
+  shouldSendStopRiskWarning(position, stopRiskSnapshot) {
+    if (!this.config.telegram.stopRiskAlertEnabled) return false;
+    if (!stopRiskSnapshot) return false;
+
+    const threshold = Math.max(50, Math.min(99, Number(this.config.telegram.stopRiskAlertThreshold || 76)));
+    if (Number(stopRiskSnapshot.stopRiskPct || 0) < threshold) return false;
+
+    const cooldownMs = Math.max(10000, Number(this.config.telegram.stopRiskAlertCooldownMs || 30000));
+    const now = Date.now();
+    const key = `${position.symbol}:${position.id || position.openedAt || position.entryPrice}:${position.side}`;
+
+    for (const [k, info] of this.positionStopRiskNotifyMap.entries()) {
+      if (now - Number(info?.at || 0) > cooldownMs * 8) this.positionStopRiskNotifyMap.delete(k);
+    }
+
+    const prev = this.positionStopRiskNotifyMap.get(key);
+    if (prev && now - prev.at < cooldownMs) return false;
+
+    this.positionStopRiskNotifyMap.set(key, {
+      at: now,
+      stopRiskPct: Number(stopRiskSnapshot.stopRiskPct || 0),
+    });
+    return true;
+  }
+
   async sendPositionPulse() {
     const position = this.stateStore.state.activePosition;
     if (!position) {
@@ -1852,6 +1918,21 @@ class BotEngine {
       trailingEnabled: Boolean(position.trailingEnabled),
       partialClosedPct: Number(position.partialClosedPct || 0),
     });
+
+    const stopRiskSnapshot = this.calcStopRiskSnapshot(position, currentPrice, probability, direction);
+    if (this.shouldSendStopRiskWarning(position, stopRiskSnapshot)) {
+      await this.telegramService.sendStopRiskWarning({
+        symbol: position.symbol,
+        side: position.side,
+        currentPrice,
+        entryPrice: position.entryPrice,
+        stopLoss: position.stopLoss,
+        probability,
+        stopRiskPct: stopRiskSnapshot.stopRiskPct,
+        riskUsedPct: stopRiskSnapshot.riskUsedPct,
+        reason: stopRiskSnapshot.reason,
+      });
+    }
   }
 
   startPositionPulse() {
@@ -1891,6 +1972,7 @@ class BotEngine {
     else {
       this.stopPositionPulse();
       this.positionPulseEndedPositionId = null;
+      this.positionStopRiskNotifyMap.clear();
     }
   }
 

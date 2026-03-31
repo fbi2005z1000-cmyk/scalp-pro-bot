@@ -220,6 +220,12 @@ function validateCoreConfig(config) {
   if (!Number.isFinite(tg.positionHeartbeatMs) || tg.positionHeartbeatMs < 5000) {
     errors.push('telegram.positionHeartbeatMs phai >= 5000');
   }
+  if (!inRange(Number(tg.stopRiskAlertThreshold), 1, 100)) {
+    errors.push('telegram.stopRiskAlertThreshold phai trong [1,100]');
+  }
+  if (!Number.isFinite(tg.stopRiskAlertCooldownMs) || tg.stopRiskAlertCooldownMs < 5000) {
+    errors.push('telegram.stopRiskAlertCooldownMs phai >= 5000');
+  }
 
   if (!Number.isFinite(config.security.rateLimitWindowMs) || config.security.rateLimitWindowMs < 1000) {
     errors.push('security.rateLimitWindowMs phai >= 1000');

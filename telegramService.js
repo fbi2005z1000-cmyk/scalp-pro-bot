@@ -587,6 +587,23 @@ class TelegramService {
     return '- Không có setup đạt chuẩn, tiếp tục quan sát';
   }
 
+  buildEntryCandleColorText(side, detailed = false) {
+    const normalized = String(side || '').toUpperCase();
+    if (normalized === 'LONG') {
+      return detailed
+        ? '🕯️ Nến vào lệnh ưu tiên: NẾN XANH xác nhận (đóng trên vùng entry, thân nến rõ).'
+        : '🕯️ Nến vào lệnh ưu tiên: NẾN XANH xác nhận';
+    }
+    if (normalized === 'SHORT') {
+      return detailed
+        ? '🕯️ Nến vào lệnh ưu tiên: NẾN ĐỎ xác nhận (đóng dưới vùng entry, thân nến rõ).'
+        : '🕯️ Nến vào lệnh ưu tiên: NẾN ĐỎ xác nhận';
+    }
+    return detailed
+      ? '🕯️ Nến vào lệnh: chờ nến xác nhận rõ ràng theo setup.'
+      : '🕯️ Nến vào lệnh: chờ nến xác nhận rõ ràng';
+  }
+
   normalizeReasonText(text) {
     return String(text || '')
       .replace(/\uFFFD/g, '')
@@ -691,6 +708,7 @@ class TelegramService {
       `🟡 <b>KÈO ${stageText}</b> | ${icon} <b>${side}</b> | ${coinIcon} <b>${esc(preData.symbol || 'N/A')}</b> | <b>${esc(preData.timeframe || 'N/A')}</b>`,
       ``,
       `${countdownIcon} Còn: <b>${countdownText}</b> (${etaMin} phút)`,
+      this.buildEntryCandleColorText(side, true),
       `📍 Vùng trigger: <b>${fmtPrice(trigger)}</b>`,
       `🛑 SL dự kiến: <b>${fmtPrice(sl)}</b>`,
       `🎯 TP1/TP2/TP3: <b>${fmtPrice(tp1)} / ${fmtPrice(tp2)} / ${fmtPrice(tp3)}</b>`,
@@ -823,6 +841,7 @@ class TelegramService {
       `⚙️ <b>Đòn bẩy:</b> x${Number.isFinite(leverage) && leverage > 0 ? leverage.toFixed(0) : '10'}`,
       `📊 <b>Confidence:</b> ${Number(signalData.confidence || 0)}/100`,
       `${sideMeta.trendIcon} <b>Trend 5m:</b> ${esc(trendVi)}`,
+      this.buildEntryCandleColorText(side, true),
       signalData.entryConfirmReason ? `🧩 <b>Xác nhận:</b> ${esc(String(signalData.entryConfirmReason))}` : '',
       ``,
       `✅ <b>Lý do vào:</b>`,
@@ -862,6 +881,7 @@ class TelegramService {
         `🚀 <b>ĐÃ VÀO LỆNH</b>`,
         `Coin: ${coinIcon} <b>${esc(orderData.symbol)}</b>`,
         `Loại: <b>${esc(orderData.side)}</b>`,
+        this.buildEntryCandleColorText(orderData.side, false),
         `Giá vào: <b>${Number(orderData.entryPrice || 0).toFixed(2)}</b>`,
         `Khối lượng: <b>${Number(orderData.size || 0).toFixed(4)}</b>`,
         `Đòn bẩy: x${esc(orderData.leverage)}`,
@@ -957,6 +977,41 @@ class TelegramService {
       idempotencyTtlMs: Math.max(1000, cooldownMs - 300),
       cooldownMs,
       symbol: heartbeat.symbol,
+    });
+  }
+
+  async sendStopRiskWarning(warning) {
+    if (!this.config.sendOrderOpen) return;
+    const symbol = String(warning.symbol || '').toUpperCase();
+    if (!symbol) return;
+    const side = String(warning.side || '').toUpperCase();
+    const sideIcon = side === 'LONG' ? '🟢' : '🔴';
+    const coinIcon = this.getSymbolIcon(symbol);
+    const botBadge = this.getBotBadge({ symbol });
+    const stopRiskPct = Math.max(0, Math.min(100, Number(warning.stopRiskPct || 0)));
+    const probability = Math.max(0, Math.min(100, Number(warning.probability || 0)));
+    const riskUsedPct = Math.max(0, Math.min(200, Number(warning.riskUsedPct || 0)));
+    const cooldownMs = Math.max(10000, Number(this.config.stopRiskAlertCooldownMs || 30000));
+
+    const text = [
+      `${botBadge}`,
+      `🚨 <b>CẢNH BÁO NGUY CƠ VƯỢT SL CAO</b> ${sideIcon}`,
+      `Coin: ${coinIcon} <b>${esc(symbol)}</b> | Side: <b>${esc(side || 'N/A')}</b>`,
+      `Giá hiện tại: <b>${Number(warning.currentPrice || 0).toFixed(4)}</b>`,
+      `Entry/SL: <b>${Number(warning.entryPrice || 0).toFixed(4)} / ${Number(warning.stopLoss || 0).toFixed(4)}</b>`,
+      `⚠️ Xác suất chạm/vượt SL: <b>${stopRiskPct.toFixed(1)}%</b>`,
+      `📉 Xác suất an toàn realtime: <b>${probability.toFixed(1)}%</b>`,
+      `📏 Mức sử dụng vùng rủi ro: <b>${riskUsedPct.toFixed(1)}%</b>`,
+      warning.reason ? `🧩 Lý do: ${esc(String(warning.reason))}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    await this.sendText(text, {
+      idempotencyKey: `sl-risk:${symbol}:${side}:${Math.floor(Date.now() / cooldownMs)}`,
+      idempotencyTtlMs: Math.max(1000, cooldownMs - 250),
+      cooldownMs: Math.max(4000, Math.floor(cooldownMs / 2)),
+      symbol,
     });
   }
 
