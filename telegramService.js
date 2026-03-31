@@ -662,6 +662,22 @@ class TelegramService {
         ? '✅ ĐẸP'
         : '⚠️ THEO DÕI';
     const remainingCandles = Number(preData.remainingCandles || 0);
+    const countdownStep = Number.isFinite(Number(preData.countdownStep))
+      ? Number(preData.countdownStep)
+      : remainingCandles;
+    const countdownIcon = countdownStep <= 0 ? '🚀' : '⏳';
+    const countdownText =
+      countdownStep <= 0
+        ? '0 nến (điểm vào đã tới, kiểm tra nến xác nhận để vào lệnh)'
+        : `${countdownStep} nến`;
+    const stageText =
+      countdownStep >= 5
+        ? 'DỰ BÁO SỚM'
+        : countdownStep >= 3
+        ? 'CHUẨN BỊ'
+        : countdownStep >= 1
+        ? 'SÁT ĐIỂM VÀO'
+        : 'ĐIỂM VÀO';
 
     const fmtPrice = (val) => {
       const n = Number(val);
@@ -672,9 +688,9 @@ class TelegramService {
     const text = [
       `${botBadge}`,
       `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(preData.symbol || 'N/A')}</b>`,
-      `🟡 <b>KÈO CHUẨN BỊ</b> | ${icon} <b>${side}</b> | ${coinIcon} <b>${esc(preData.symbol || 'N/A')}</b> | <b>${esc(preData.timeframe || 'N/A')}</b>`,
+      `🟡 <b>KÈO ${stageText}</b> | ${icon} <b>${side}</b> | ${coinIcon} <b>${esc(preData.symbol || 'N/A')}</b> | <b>${esc(preData.timeframe || 'N/A')}</b>`,
       ``,
-      `⏳ Còn khoảng: <b>${remainingCandles || '?'} nến</b> (${etaMin} phút)`,
+      `${countdownIcon} Còn: <b>${countdownText}</b> (${etaMin} phút)`,
       `📍 Vùng trigger: <b>${fmtPrice(trigger)}</b>`,
       `🛑 SL dự kiến: <b>${fmtPrice(sl)}</b>`,
       `🎯 TP1/TP2/TP3: <b>${fmtPrice(tp1)} / ${fmtPrice(tp2)} / ${fmtPrice(tp3)}</b>`,
@@ -685,7 +701,7 @@ class TelegramService {
       reasons.length ? `✅ Lý do: ${esc(reasons.join(' | '))}` : '',
     ].filter(Boolean).join('\n');
 
-    const idem = `pre:${preData.symbol}:${preData.timeframe}:${side}:${Math.round(trigger * 10)}:${preData.candleTime || 0}`;
+    const idem = `pre:${preData.symbol}:${preData.timeframe}:${side}:${Math.round(trigger * 10)}:${countdownStep}:${preData.candleTime || 0}`;
     await this.sendText(text, {
       idempotencyKey: idem,
       idempotencyTtlMs: Math.max(15000, Number(this.config.preSignalCooldownMs || 90000)),

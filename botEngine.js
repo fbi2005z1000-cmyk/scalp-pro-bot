@@ -34,6 +34,7 @@ class BotEngine {
     this.lastSignalFingerprint = null;
     this.lastSignalAt = 0;
     this.preSignalDispatchMap = new Map();
+    this.preSignalCountdownMap = new Map();
     this.lastRejectNotifyAt = 0;
     this.lastRejectCode = null;
     this.lastAcceptedSignal = null;
@@ -64,6 +65,7 @@ class BotEngine {
     this.lastRestBudgetLogAt = 0;
     this.restCallWindow = [];
     this.restGeoBlockedUntil = 0;
+    this.restGeoNotifiedAt = 0;
     this.lastRestGeoLogAt = 0;
     this.lastWsNotifyAt = 0;
     this.wsHardErrorCount = 0;
@@ -417,6 +419,11 @@ class BotEngine {
   async fetchKlines(symbol, interval, limit = 600, options = {}) {
     const priority = Boolean(options.priority);
     if (Date.now() < this.restGeoBlockedUntil) {
+      const cached = this.stateStore.getCandles(symbol, interval);
+      if (Array.isArray(cached) && cached.length) {
+        const picked = cached.slice(-Math.max(20, Number(limit || 600)));
+        if (picked.length) return picked;
+      }
       const remainMs = this.restGeoBlockedUntil - Date.now();
       const err = new Error(`REST_GEO_BLOCKED ${remainMs}ms`);
       err.code = 'REST_GEO_BLOCKED';
@@ -461,9 +468,9 @@ class BotEngine {
           const now = Date.now();
           const blockMs = 15 * 60 * 1000;
           this.restGeoBlockedUntil = Math.max(this.restGeoBlockedUntil, now + blockMs);
-          if (now - this.lastRestGeoLogAt > 10000) {
-            this.lastRestGeoLogAt = now;
-            this.logger.warn('bot', 'REST Binance bị chặn theo region/chính sách, tạm dùng WS + cache', {
+          if (now - this.restGeoNotifiedAt > 60 * 60 * 1000) {
+            this.restGeoNotifiedAt = now;
+            this.logger.warn('bot', 'REST Binance bị chặn theo region/chính sách, tự chuyển WS + cache', {
               status: this.getHttpStatus(error),
               blockMs,
               blockedUntil: this.restGeoBlockedUntil,
@@ -733,9 +740,27 @@ class BotEngine {
   prunePreSignalDispatchMap() {
     const now = Date.now();
     const keepMs = 3 * 60 * 60 * 1000;
-    for (const [key, ts] of this.preSignalDispatchMap.entries()) {
-      if (now - ts > keepMs) this.preSignalDispatchMap.delete(key);
+    for (const [key, value] of this.preSignalDispatchMap.entries()) {
+      const ts = Number(value?.lastSentAt || value || 0);
+      if (!ts || now - ts > keepMs) this.preSignalDispatchMap.delete(key);
     }
+    for (const [key, value] of this.preSignalCountdownMap.entries()) {
+      const ts = Number(value?.lastSentAt || value || 0);
+      if (!ts || now - ts > keepMs) this.preSignalCountdownMap.delete(key);
+    }
+  }
+
+  buildPreSignalCountdownStep(remainingCandles) {
+    const n = Number(remainingCandles);
+    if (!Number.isFinite(n)) return null;
+    const clamped = Math.max(0, Math.min(5, Math.ceil(n)));
+    return clamped;
+  }
+
+  buildPreSignalCampaignKey(signal, timeframe, pre) {
+    const triggerPrice = Number(pre?.triggerPrice || 0);
+    const band = triggerPrice > 0 ? Math.round(triggerPrice / Math.max(triggerPrice * 0.0005, 0.5)) : 0;
+    return `${signal.symbol}:${timeframe}:${pre.side}:${band}`;
   }
 
   calculatePreSignalLiveStats(signal, pre) {
@@ -816,23 +841,40 @@ class BotEngine {
       minEta,
     );
     if (etaSec < minEta || etaSec > maxEta) return false;
-
-    const triggerPrice = Number(pre.triggerPrice || 0);
-    if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) return false;
-
-    const band = Math.round(triggerPrice / Math.max(triggerPrice * 0.0005, 0.5));
-    this.prunePreSignalDispatchMap();
-    const closeKey = Number.isFinite(Number(candleTime)) ? Number(candleTime) : Math.floor(Date.now() / 1000);
-    const scoreBucket = Math.round(probability / 5);
-    const fingerprint = `${signal.symbol}:${timeframe}:${closeKey}:${pre.side}:${pre.mode}:${scoreBucket}:${band}`;
-    if (this.preSignalDispatchMap.has(fingerprint)) return false;
-    this.preSignalDispatchMap.set(fingerprint, Date.now());
     return true;
   }
 
   async notifyPreSignal(signal, timeframe, candleTime) {
     if (!this.shouldNotifyPreSignal(signal, timeframe, candleTime)) return;
     const pre = signal.preSignal.selected;
+    const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
+    const tfSec = this.timeframeToSec(tf);
+    const remainingCandlesRaw = Math.max(0, Math.ceil(Number(pre.etaSec || 0) / tfSec));
+    const step = this.buildPreSignalCountdownStep(remainingCandlesRaw);
+    if (step === null) return;
+    if (remainingCandlesRaw > 5) return;
+
+    const campaignKey = this.buildPreSignalCampaignKey(signal, tf, pre);
+    this.prunePreSignalDispatchMap();
+    const campaign = this.preSignalCountdownMap.get(campaignKey) || {
+      lastStep: null,
+      lastSentAt: 0,
+      lastCandleTime: null,
+    };
+    const now = Date.now();
+    const stepCooldown = Math.max(4000, Number(this.config.trading.preSignalEmitIntervalMs || 3500));
+    const sameStep = campaign.lastStep === step;
+    const sameCandle = Number(campaign.lastCandleTime || 0) === Number(candleTime || 0);
+
+    // Gửi theo nhịp nến: chỉ khi step giảm, hoặc đổi nến.
+    if (sameStep && (sameCandle || now - Number(campaign.lastSentAt || 0) < stepCooldown)) {
+      return;
+    }
+    if (Number.isFinite(Number(campaign.lastStep)) && step > Number(campaign.lastStep)) {
+      // ETA dao động tăng tạm thời => bỏ qua để tránh nhảy số ngược.
+      return;
+    }
+
     const feeRates = await this.orderManager.getFeeRates(signal.symbol);
     const signalWithFee = {
       ...signal,
@@ -845,11 +887,10 @@ class BotEngine {
     };
     const liveStats = this.calculatePreSignalLiveStats(signalWithFee, preWithFee);
     if (Number(liveStats.targetRoiNetPct?.tp1 || 0) <= 0) return;
-    const tfSec = this.timeframeToSec(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
-    const remainingCandles = Math.max(1, Math.ceil(Number(pre.etaSec || 0) / tfSec));
+    const remainingCandles = Math.max(0, remainingCandlesRaw);
     await this.telegramService.sendPreSignal({
       symbol: signal.symbol,
-      timeframe: timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m',
+      timeframe: tf,
       side: pre.side,
       mode: pre.mode,
       probability: pre.probability,
@@ -865,7 +906,14 @@ class BotEngine {
       reasons: pre.reasons || [],
       liveStats,
       remainingCandles,
+      countdownStep: step,
       candleTime,
+    });
+
+    this.preSignalCountdownMap.set(campaignKey, {
+      lastStep: step,
+      lastSentAt: now,
+      lastCandleTime: Number(candleTime || 0),
     });
   }
 
