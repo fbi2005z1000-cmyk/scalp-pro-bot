@@ -36,7 +36,7 @@
     lastTickTs: 0,
     lastClosedSyncKey: '',
     pendingChartRefresh: false,
-    timezoneMode: 'LOCAL',
+    timezoneMode: 'UTC',
     priceSource: 'LAST',
     livePrice: 0,
     directKlineWs: null,
@@ -85,6 +85,10 @@
     chartFootNote: document.getElementById('chartFootNote'),
     indicatorLegend: document.getElementById('indicatorLegend'),
     logContainer: document.getElementById('logContainer'),
+    fleetBadge: document.getElementById('fleetBadge'),
+    fleetSummary: document.getElementById('fleetSummary'),
+    fleetActiveList: document.getElementById('fleetActiveList'),
+    fleetInactiveList: document.getElementById('fleetInactiveList'),
     rsGuidePriceNow: document.getElementById('rsGuidePriceNow'),
     rsMeaningGrid: document.getElementById('rsMeaningGrid'),
     rsScenarioBox: document.getElementById('rsScenarioBox'),
@@ -259,6 +263,20 @@
     const m = Math.floor(s / 60);
     const rs = s % 60;
     return rs ? `${m}m ${rs}s` : `${m}m`;
+  }
+
+  function formatAgoMs(ms) {
+    if (!Number.isFinite(Number(ms))) return 'N/A';
+    const v = Math.max(0, Math.round(Number(ms)));
+    if (v < 1000) return `${v}ms`;
+    const s = Math.floor(v / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return rs ? `${m}m ${rs}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm ? `${h}h ${rm}m` : `${h}h`;
   }
 
   function hasNum(v) {
@@ -1435,6 +1453,105 @@
 
     el.chartFootNote.textContent = `${cooldownText} | ${pos} | ${priceText} | ${indicatorText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
     renderRsGuidePanel();
+    renderFleet(status);
+  }
+
+  function syncSymbolSelectFromStatus(status) {
+    const symbols = status?.scanner?.symbols;
+    if (!Array.isArray(symbols) || !symbols.length || !el.symbolSelect) return;
+    const normalized = symbols.map((s) => String(s || '').toUpperCase()).filter(Boolean);
+    if (!normalized.length) return;
+    const existing = Array.from(el.symbolSelect.options).map((o) => String(o.value || '').toUpperCase());
+    if (
+      existing.length === normalized.length &&
+      existing.every((s, i) => s === normalized[i])
+    ) {
+      return;
+    }
+
+    el.symbolSelect.innerHTML = normalized.map((s) => `<option value="${s}">${s}</option>`).join('');
+    if (normalized.includes(state.symbol)) {
+      el.symbolSelect.value = state.symbol;
+    } else {
+      state.symbol = normalized[0];
+      el.symbolSelect.value = state.symbol;
+    }
+  }
+
+  function renderFleet(status) {
+    if (!el.fleetSummary || !el.fleetActiveList || !el.fleetInactiveList || !el.fleetBadge) return;
+    const direct = status?.fleet?.directBots || {};
+    const bots = Array.isArray(direct.bots) ? direct.bots : [];
+    const watchdog = direct.watchdog || {};
+    const staleMs = Number(direct.staleMs || status?.scanner?.staleMs || 0);
+
+    if (!bots.length) {
+      el.fleetBadge.className = 'badge warn';
+      el.fleetBadge.textContent = 'Chưa nhận fleet bot';
+      el.fleetSummary.innerHTML = `<div class="fleet-empty">Chưa có dữ liệu bot trực coin.</div>`;
+      el.fleetActiveList.innerHTML = `<div class="fleet-empty">N/A</div>`;
+      el.fleetInactiveList.innerHTML = `<div class="fleet-empty">N/A</div>`;
+      return;
+    }
+
+    const active = bots.filter((b) => b.health === 'ACTIVE');
+    const stalled = bots.filter((b) => b.health === 'STALLED');
+    const inactive = bots.filter((b) => b.health === 'INACTIVE');
+
+    const requestedCount = Number(direct.requestedCount || bots.length);
+    const runningCount = Number(direct.runningCount || active.length);
+    const healthPct = requestedCount > 0 ? Math.round((runningCount / requestedCount) * 100) : 0;
+    const good = inactive.length === 0 && stalled.length === 0;
+    el.fleetBadge.className = good ? 'badge long' : 'badge warn';
+    el.fleetBadge.textContent = good
+      ? `Ổn định ${runningCount}/${requestedCount}`
+      : `Cần phục hồi ${requestedCount - runningCount}/${requestedCount}`;
+
+    el.fleetSummary.innerHTML = [
+      ['Bot yêu cầu', `${requestedCount}`],
+      ['Bot hoạt động', `${runningCount}`],
+      ['Bot lỗi/stalled', `${inactive.length + stalled.length}`],
+      ['Health', `${healthPct}%`],
+      ['Watchdog', watchdog.enabled ? `BẬT (${formatAgoMs(watchdog.watchdogMs)})` : 'TẮT'],
+      ['Đã tự phục hồi', `${watchdog.recoveryCount || 0}`],
+      ['Khởi động lại scanner', `${watchdog.scannerRestartCount || 0}`],
+      ['Stale ngưỡng', staleMs ? formatAgoMs(staleMs) : 'N/A'],
+      ['Watchdog gần nhất', watchdog.lastRunAt ? formatByTimezone(new Date(watchdog.lastRunAt), true) : 'N/A'],
+    ]
+      .map(
+        ([k, v]) => `<div class="item"><div class="k">${k}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
+      )
+      .join('');
+
+    const sortByRun = (a, b) => Number(b.lastRunAt || 0) - Number(a.lastRunAt || 0);
+    const renderBotRow = (bot) => {
+      const lastRunText = bot.lastRunAt ? formatByTimezone(new Date(bot.lastRunAt), true) : 'N/A';
+      const staleText = Number.isFinite(bot.staleForMs) ? formatAgoMs(bot.staleForMs) : 'N/A';
+      const healthClass =
+        bot.health === 'ACTIVE' ? 'long' : bot.health === 'STALLED' ? 'warn' : 'short';
+      const err = bot.lastError ? ` | lỗi: ${bot.lastError}` : '';
+      return `<div class="fleet-row">
+        <div class="head">
+          <span class="symbol">${bot.symbol}</span>
+          <span class="badge ${healthClass}">${bot.health || bot.state || 'N/A'}</span>
+        </div>
+        <div class="meta">
+          state=${bot.state || 'N/A'} | tf=${bot.timeframe || 'N/A'} | chạy gần nhất=${lastRunText}<br>
+          stale=${staleText} | scan=${bot.analysisCount || 0} | signal=${bot.signalCount || 0} | reject=${bot.rejectCount || 0}${err}
+        </div>
+      </div>`;
+    };
+
+    const activeList = active.sort(sortByRun);
+    const inactiveList = [...stalled, ...inactive].sort(sortByRun);
+
+    el.fleetActiveList.innerHTML = activeList.length
+      ? activeList.map(renderBotRow).join('')
+      : `<div class="fleet-empty">Không có bot ACTIVE.</div>`;
+
+    el.fleetInactiveList.innerHTML = inactiveList.length
+      ? inactiveList.map(renderBotRow).join('')
+      : `<div class="fleet-empty">Tất cả bot đang hoạt động ổn định.</div>`;
   }
 
   function renderLogs(logs) {
@@ -1471,41 +1588,74 @@
     }
   }
 
-  async function loadInitialCandles(forceFresh = false, strictFresh = false) {
+  async function hydrateCandlesToBackend(symbol, timeframe, candles) {
+    if (!Array.isArray(candles) || candles.length < 20) return;
+    try {
+      await api.post('/candles/hydrate', { symbol, timeframe, candles });
+    } catch (error) {
+      console.warn(`hydrate candles thất bại ở ${timeframe}`, error);
+    }
+  }
+
+  async function loadCandlesPrimary(tf, forceFresh = false, strictFresh = false) {
     const freshQ = forceFresh ? '&fresh=1' : '';
+    const useStrict = forceFresh && strictFresh;
+    const strictQ = useStrict ? '&strict=1' : '';
+
+    if (forceFresh) {
+      try {
+        const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+        if (Array.isArray(direct) && direct.length >= 80) {
+          hydrateCandlesToBackend(state.symbol, tf, direct);
+          return direct;
+        }
+      } catch (directError) {
+        console.warn(`binance direct primary lỗi ở ${tf}`, directError);
+      }
+    }
+
+    try {
+      let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
+      if (forceFresh && Array.isArray(data) && data.length < 80) {
+        try {
+          const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+          if (direct.length > data.length) {
+            data = direct;
+            hydrateCandlesToBackend(state.symbol, tf, direct);
+          }
+        } catch (directError) {
+          console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
+        }
+      }
+      return data;
+    } catch (error) {
+      if (useStrict) {
+        console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
+        let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
+        if (forceFresh && Array.isArray(data) && data.length < 80) {
+          try {
+            const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
+            if (direct.length > data.length) {
+              data = direct;
+              hydrateCandlesToBackend(state.symbol, tf, direct);
+            }
+          } catch (directError) {
+            console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
+          }
+        }
+        return data;
+      }
+      throw error;
+    }
+  }
+
+  async function loadInitialCandles(forceFresh = false, strictFresh = false) {
     const tfs = ['1m', '3m', '5m', '15m'];
     const byTf = await Promise.all(
-      tfs.map(async (tf) => {
-        const useStrict = forceFresh && strictFresh && tf === state.timeframe;
-        try {
-          const strictQ = useStrict ? '&strict=1' : '';
-          let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
-          if (forceFresh && Array.isArray(data) && data.length < 80) {
-            try {
-              const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
-              if (direct.length > data.length) data = direct;
-            } catch (directError) {
-              console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
-            }
-          }
-          return [tf, data];
-        } catch (error) {
-          if (useStrict) {
-            console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
-            let data = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
-            if (forceFresh && Array.isArray(data) && data.length < 80) {
-              try {
-                const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
-                if (direct.length > data.length) data = direct;
-              } catch (directError) {
-                console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
-              }
-            }
-            return [tf, data];
-          }
-          throw error;
-        }
-      }),
+      tfs.map(async (tf) => [
+        tf,
+        await loadCandlesPrimary(tf, forceFresh, strictFresh && tf === state.timeframe),
+      ]),
     );
     const candleMap = Object.fromEntries(byTf);
     const candles1m = candleMap['1m'] || [];
@@ -1535,27 +1685,7 @@
   }
 
   async function loadSingleTimeframe(tf, forceFresh = false, strictFresh = false) {
-    const freshQ = forceFresh ? '&fresh=1' : '';
-    const strictQ = forceFresh && strictFresh ? '&strict=1' : '';
-    let candles = [];
-    try {
-      candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}${strictQ}`);
-    } catch (error) {
-      if (forceFresh && strictFresh) {
-        console.warn(`strict fresh lỗi ở ${tf}, fallback fresh non-strict`, error);
-        candles = await api.get(`/candles?symbol=${state.symbol}&timeframe=${tf}${freshQ}`);
-      } else {
-        throw error;
-      }
-    }
-    if (forceFresh && Array.isArray(candles) && candles.length < 80) {
-      try {
-        const direct = await fetchBinanceKlinesDirect(state.symbol, tf, 700);
-        if (direct.length > candles.length) candles = direct;
-      } catch (directError) {
-        console.warn(`binance direct fallback lỗi ở ${tf}`, directError);
-      }
-    }
+    const candles = await loadCandlesPrimary(tf, forceFresh, strictFresh);
     const normalized = normalizeCandles(
       candles.map((c) => ({
         time: Number(c.time),
@@ -1586,6 +1716,7 @@
       state.signal = signal;
       state.status = status;
       state.stats = stats;
+      syncSymbolSelectFromStatus(status);
       if (status.priceSource) {
         state.priceSource = status.priceSource;
         el.priceSourceSelect.value = status.priceSource;

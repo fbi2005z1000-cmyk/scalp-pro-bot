@@ -36,7 +36,7 @@
               <option value="ADAUSDT">ADAUSDT</option>
               <option value="TRXUSDT">TRXUSDT</option>
               <option value="LINKUSDT">LINKUSDT</option>
-              <option value="MATICUSDT">MATICUSDT</option>
+              <option value="POLUSDT">POLUSDT</option>
               <option value="AVAXUSDT">AVAXUSDT</option>
               <option value="LTCUSDT">LTCUSDT</option>
               <option value="DOTUSDT">DOTUSDT</option>
@@ -67,8 +67,8 @@
           </label>
           <label>Timezone
             <select id="timezoneSelect">
-              <option value="LOCAL" selected>LOCAL</option>
-              <option value="UTC">UTC</option>
+              <option value="LOCAL">LOCAL</option>
+              <option value="UTC" selected>UTC</option>
             </select>
           </label>
           <div class="status-inline">
@@ -210,6 +210,24 @@
             <h2>Thống Kê</h2>
           </div>
           <div id="statsGrid" class="stats-grid"></div>
+        </section>
+
+        <section class="panel glass fleet-panel">
+          <div class="panel-head">
+            <h2>Đội Bot Trực Coin</h2>
+            <span id="fleetBadge" class="badge neutral">Chưa có dữ liệu</span>
+          </div>
+          <div id="fleetSummary" class="fleet-summary-grid"></div>
+          <div class="fleet-columns">
+            <div class="fleet-col">
+              <h3>Bot đang hoạt động</h3>
+              <div id="fleetActiveList" class="fleet-list"></div>
+            </div>
+            <div class="fleet-col">
+              <h3>Bot không hoạt động / cần phục hồi</h3>
+              <div id="fleetInactiveList" class="fleet-list"></div>
+            </div>
+          </div>
         </section>
 
         <section class="panel glass glossary-panel">

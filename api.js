@@ -147,6 +147,31 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     }
   });
 
+  router.post('/candles/hydrate', (req, res) => {
+    const symbol = String(req.body?.symbol || '').toUpperCase();
+    const timeframe = String(req.body?.timeframe || '');
+    const candles = Array.isArray(req.body?.candles) ? req.body.candles : [];
+    const analysisTf = config.timeframe.analysis || '3m';
+    const allow = Array.from(new Set(['1m', '3m', analysisTf, '5m', '15m']));
+
+    if (!symbol) {
+      return res.status(400).json({ ok: false, error: 'Thiếu symbol' });
+    }
+    if (!allow.includes(timeframe)) {
+      return res.status(400).json({ ok: false, error: 'timeframe không hợp lệ' });
+    }
+    if (!candles.length) {
+      return res.status(400).json({ ok: false, error: 'Thiếu dữ liệu candles' });
+    }
+
+    const result = botEngine.hydrateCandlesFromClient(symbol, timeframe, candles);
+    if (!result.ok) {
+      return res.status(400).json({ ok: false, error: result.reason || 'Hydrate thất bại' });
+    }
+
+    return res.json({ ok: true, data: { symbol, timeframe, count: result.count } });
+  });
+
   router.get('/stream', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');

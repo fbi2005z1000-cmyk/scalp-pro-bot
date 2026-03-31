@@ -187,6 +187,15 @@ function validateCoreConfig(config) {
   if (!Number.isFinite(b.scannerBootstrapDelayMs) || b.scannerBootstrapDelayMs < 0) {
     errors.push('binance.scannerBootstrapDelayMs phai >= 0');
   }
+  if (!Number.isFinite(b.directBotWatchdogMs) || b.directBotWatchdogMs < 5000) {
+    errors.push('binance.directBotWatchdogMs phai >= 5000');
+  }
+  if (!Number.isFinite(b.directBotStaleMs) || b.directBotStaleMs < 10000) {
+    errors.push('binance.directBotStaleMs phai >= 10000');
+  }
+  if (!Number.isFinite(b.directBotRecoverPerTick) || b.directBotRecoverPerTick < 1) {
+    errors.push('binance.directBotRecoverPerTick phai >= 1');
+  }
 
   const tg = config.telegram || {};
   if (tg.enabled) {

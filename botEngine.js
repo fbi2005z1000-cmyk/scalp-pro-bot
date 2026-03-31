@@ -49,6 +49,10 @@ class BotEngine {
     this.multiScanLastSignalByKey = new Map();
     this.multiScanCursor = 0;
     this.directBots = new Map();
+    this.directBotWatchdogTimer = null;
+    this.directBotRecoveryCount = 0;
+    this.directBotRestartCount = 0;
+    this.directBotLastWatchdogAt = 0;
     this.positionPulseTimer = null;
     this.positionPulseEndAt = 0;
     this.positionPulseLastPrice = null;
@@ -58,6 +62,8 @@ class BotEngine {
     this.lastRestBlockLogAt = 0;
     this.lastRestBudgetLogAt = 0;
     this.restCallWindow = [];
+    this.restGeoBlockedUntil = 0;
+    this.lastRestGeoLogAt = 0;
     this.bound = false;
   }
 
@@ -79,17 +85,45 @@ class BotEngine {
     return status === 418 || status === 429;
   }
 
+  isGeoBlockedError(error) {
+    const status = this.getHttpStatus(error);
+    return status === 451 || status === 403;
+  }
+
   isTransientRestError(error) {
     if (this.isRateLimitError(error)) return true;
+    if (this.isGeoBlockedError(error)) return true;
     const msg = String(error?.message || '').toUpperCase();
     return (
       msg.includes('STATUS CODE 418') ||
       msg.includes('STATUS CODE 429') ||
+      msg.includes('STATUS CODE 451') ||
+      msg.includes('STATUS CODE 403') ||
       msg.includes('ECONNRESET') ||
       msg.includes('ETIMEDOUT') ||
       msg.includes('EAI_AGAIN') ||
-      msg.includes('REST_BLOCKED')
+      msg.includes('REST_BLOCKED') ||
+      msg.includes('REST_GEO_BLOCKED')
     );
+  }
+
+  normalizeClientCandles(candles = []) {
+    if (!Array.isArray(candles)) return [];
+    const byTime = new Map();
+    for (const c of candles) {
+      const t = Number(c?.time);
+      if (!Number.isFinite(t)) continue;
+      byTime.set(t, {
+        time: t,
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+        volume: Number(c.volume || 0),
+        isClosed: Boolean(c.isClosed),
+      });
+    }
+    return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
   }
 
   getRetryAfterMs(error) {
@@ -162,6 +196,7 @@ class BotEngine {
     this.bindWebsocket();
     this.websocketManager.connect(this.stateStore.state.symbol);
     this.startMultiSymbolScanner();
+    this.startDirectBotWatchdog();
   }
 
   bindWebsocket() {
@@ -316,6 +351,12 @@ class BotEngine {
 
   async fetchKlines(symbol, interval, limit = 600, options = {}) {
     const priority = Boolean(options.priority);
+    if (Date.now() < this.restGeoBlockedUntil) {
+      const remainMs = this.restGeoBlockedUntil - Date.now();
+      const err = new Error(`REST_GEO_BLOCKED ${remainMs}ms`);
+      err.code = 'REST_GEO_BLOCKED';
+      throw err;
+    }
     if (!priority && Date.now() < this.restBlockedUntil) {
       const remainMs = this.restBlockedUntil - Date.now();
       const err = new Error(`REST_BLOCKED ${remainMs}ms`);
@@ -351,6 +392,20 @@ class BotEngine {
         }));
       } catch (error) {
         lastError = error;
+        if (this.isGeoBlockedError(error)) {
+          const now = Date.now();
+          const blockMs = 15 * 60 * 1000;
+          this.restGeoBlockedUntil = Math.max(this.restGeoBlockedUntil, now + blockMs);
+          if (now - this.lastRestGeoLogAt > 10000) {
+            this.lastRestGeoLogAt = now;
+            this.logger.warn('bot', 'REST Binance bị chặn theo region/chính sách, tạm dùng WS + cache', {
+              status: this.getHttpStatus(error),
+              blockMs,
+              blockedUntil: this.restGeoBlockedUntil,
+            });
+          }
+          break;
+        }
         if (this.isRateLimitError(error)) {
           this.blockRestByRateLimit(error);
           break;
@@ -382,6 +437,16 @@ class BotEngine {
     }
   }
 
+  hydrateCandlesFromClient(symbol, timeframe, candles = []) {
+    const normalized = this.normalizeClientCandles(candles);
+    if (!normalized.length) {
+      return { ok: false, reason: 'NO_VALID_CANDLES' };
+    }
+    const limit = Math.max(120, Number(this.config.timeframe.limit || 600));
+    this.stateStore.setCandles(String(symbol || '').toUpperCase(), timeframe, normalized, limit);
+    return { ok: true, count: normalized.length };
+  }
+
   async bootstrapCandles(symbol) {
     const analysisTf = this.config.timeframe.analysis || '3m';
     const intervals = Array.from(new Set(['1m', '3m', '5m', '15m', analysisTf]));
@@ -411,20 +476,27 @@ class BotEngine {
 
     const countByTf = Object.fromEntries(ok.map((d) => [d.tf, d.candles.length]));
     if (failed.length) {
-      this.logger.warn('bot', 'Bootstrap nến có khung lỗi, dùng dữ liệu còn lại', {
+      const transientOnly = failed.every((f) => this.isTransientRestError({ message: f.error }));
+      const logMethod = transientOnly ? this.logger.info.bind(this.logger) : this.logger.warn.bind(this.logger);
+      logMethod('bot', 'Bootstrap nến có khung lỗi, dùng dữ liệu còn lại', {
         symbol,
         failed,
+        transientOnly,
       });
-      const transientOnly = failed.every((f) => this.isTransientRestError({ message: f.error }));
       if (!transientOnly) {
         this.riskManager.registerError('BOOTSTRAP_PARTIAL', JSON.stringify(failed));
       }
     }
 
     if (!ok.length) {
-      this.logger.error('bot', 'Lỗi bootstrap candles toàn bộ khung', { symbol, failed });
       const transientOnly = failed.every((f) => this.isTransientRestError({ message: f.error }));
-      if (!transientOnly) {
+      if (transientOnly) {
+        this.logger.info('bot', 'Lỗi bootstrap candles toàn bộ khung (transient), dùng WS + cache', {
+          symbol,
+          failed,
+        });
+      } else {
+        this.logger.error('bot', 'Lỗi bootstrap candles toàn bộ khung', { symbol, failed });
         this.riskManager.registerError('BOOTSTRAP', JSON.stringify(failed));
       }
       return;
@@ -767,7 +839,15 @@ class BotEngine {
 
   initializeDirectBots() {
     const symbols = this.getScannerSymbols();
+    const symbolSet = new Set(symbols);
+    for (const existing of this.directBots.keys()) {
+      if (!symbolSet.has(existing)) {
+        this.directBots.delete(existing);
+      }
+    }
     for (const symbol of symbols) {
+      const current = this.directBots.get(symbol);
+      if (current) continue;
       this.directBots.set(symbol, {
         symbol,
         state: 'IDLE',
@@ -843,6 +923,7 @@ class BotEngine {
 
   async bootstrapScannerSymbols() {
     if (!this.config.binance.scannerEnabled) return;
+    if (Date.now() < this.restGeoBlockedUntil) return;
     const symbols = this.getScannerSymbols();
     const intervals = ['1m', '3m', '5m', '15m'];
     const batchSize = Math.max(1, Number(this.config.binance.scannerBootstrapBatchSize || 2));
@@ -850,6 +931,7 @@ class BotEngine {
     const candleLimit = Math.max(220, Number(this.config.binance.scannerCandleLimit || 260));
 
     for (let i = 0; i < symbols.length; i += batchSize) {
+      if (Date.now() < this.restGeoBlockedUntil) break;
       const batch = symbols.slice(i, i + batchSize);
       await Promise.allSettled(
         batch.map(async (symbol) => {
@@ -890,6 +972,76 @@ class BotEngine {
     if (!this.multiScanTimer) return;
     clearInterval(this.multiScanTimer);
     this.multiScanTimer = null;
+  }
+
+  getDirectBotStaleMs() {
+    const configured = Number(this.config.binance.directBotStaleMs || 60000);
+    const symbols = this.getScannerSymbols();
+    const batch = Math.max(1, Number(this.config.binance.scannerBatchSize || 1));
+    const loopMs = Math.max(3000, Number(this.config.binance.scannerLoopMs || 8000));
+    const cycleMs = loopMs * Math.max(1, Math.ceil(symbols.length / batch));
+    const floor = Math.max(20000, cycleMs * 2);
+    return Math.max(floor, configured);
+  }
+
+  classifyDirectBotHealth(bot, now = Date.now()) {
+    if (!bot) return 'INACTIVE';
+    if (bot.inFlight) return 'ACTIVE';
+    if (bot.state === 'ERROR') return 'INACTIVE';
+    const lastRunAt = Number(bot.lastRunAt || 0);
+    if (!lastRunAt) return 'INACTIVE';
+    const staleMs = this.getDirectBotStaleMs();
+    if (now - lastRunAt > staleMs) return 'STALLED';
+    return 'ACTIVE';
+  }
+
+  getDirectBotHealthSnapshot() {
+    const symbols = this.getScannerSymbols();
+    const now = Date.now();
+    const staleMs = this.getDirectBotStaleMs();
+    const bots = symbols
+      .map((symbol) => this.directBots.get(symbol))
+      .filter(Boolean)
+      .map((bot) => {
+        const health = this.classifyDirectBotHealth(bot, now);
+        return {
+          ...bot,
+          health,
+          staleForMs: bot.lastRunAt ? Math.max(0, now - bot.lastRunAt) : null,
+        };
+      });
+    const activeBots = bots.filter((b) => b.health === 'ACTIVE');
+    const stalledBots = bots.filter((b) => b.health === 'STALLED');
+    const inactiveBots = bots.filter((b) => b.health === 'INACTIVE');
+    return {
+      staleMs,
+      bots,
+      activeBots,
+      stalledBots,
+      inactiveBots,
+      activeCount: activeBots.length,
+      stalledCount: stalledBots.length,
+      inactiveCount: inactiveBots.length,
+    };
+  }
+
+  startDirectBotWatchdog() {
+    if (this.directBotWatchdogTimer) return;
+    if (!this.config.binance.scannerEnabled) return;
+    if (!this.config.binance.directBotWatchdogEnabled) return;
+
+    const watchdogMs = Math.max(5000, Number(this.config.binance.directBotWatchdogMs || 15000));
+    this.directBotWatchdogTimer = setInterval(() => {
+      this.recoverInactiveDirectBots().catch((error) => {
+        this.logger.warn('bot', 'Watchdog direct bots lỗi', { error: error.message });
+      });
+    }, watchdogMs);
+  }
+
+  stopDirectBotWatchdog() {
+    if (!this.directBotWatchdogTimer) return;
+    clearInterval(this.directBotWatchdogTimer);
+    this.directBotWatchdogTimer = null;
   }
 
   runTotalBrainGate(signal, timeframe) {
@@ -965,10 +1117,137 @@ class BotEngine {
     });
   }
 
+  async scanDirectSymbol(symbol, options = {}) {
+    const tfs = Array.isArray(options.timeframes) && options.timeframes.length
+      ? options.timeframes
+      : this.getScannerTimeframes();
+    const candleLimit = Math.max(
+      220,
+      Number(options.candleLimit || this.config.binance.scannerCandleLimit || 260),
+    );
+    const source = String(options.source || 'SCANNER_BATCH').toUpperCase();
+    const dispatchSignals = options.dispatchSignals !== false;
+
+    this.setDirectBotState(symbol, {
+      inFlight: true,
+      state: 'ANALYZING',
+      lastRunAt: Date.now(),
+    });
+
+    const datasets = await Promise.allSettled([
+      this.fetchKlines(symbol, '1m', candleLimit),
+      this.fetchKlines(symbol, '3m', candleLimit),
+      this.fetchKlines(symbol, '5m', candleLimit),
+      this.fetchKlines(symbol, '15m', candleLimit),
+    ]);
+
+    if (datasets.some((d) => d.status !== 'fulfilled')) {
+      const failed = datasets
+        .map((d, idx) => ({ d, tf: ['1m', '3m', '5m', '15m'][idx] }))
+        .filter((x) => x.d.status !== 'fulfilled')
+        .map((x) => `${x.tf}:${x.d.reason?.message || 'ERR'}`)
+        .join(' | ');
+      const transientOnly = datasets
+        .filter((d) => d.status !== 'fulfilled')
+        .every((d) => this.isTransientRestError(d.reason));
+      this.setDirectBotState(symbol, {
+        inFlight: false,
+        state: transientOnly ? 'IDLE' : 'ERROR',
+        lastRunAt: Date.now(),
+        lastError: failed || 'SCAN_DATASET_FAILED',
+      });
+      return;
+    }
+
+    const byTf = {
+      '1m': datasets[0].value,
+      '3m': datasets[1].value,
+      '5m': datasets[2].value,
+      '15m': datasets[3].value,
+    };
+
+    for (const tf of ['1m', '3m', '5m', '15m']) {
+      this.stateStore.setCandles(symbol, tf, byTf[tf], this.config.timeframe.limit);
+    }
+
+    let gotClosed = false;
+    for (const tf of tfs) {
+      const closed = byTf[tf].filter((c) => c.isClosed);
+      if (!closed.length) continue;
+      const lastClosed = closed[closed.length - 1];
+      const closeKey = `${symbol}:${tf}`;
+      const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
+      if (lastClosed.time <= prevClose) continue;
+      this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+      gotClosed = true;
+
+      const signal = this.signalEngine.analyze({
+        symbol,
+        candles1m: byTf['1m'],
+        candles2m: byTf[tf],
+        candles5m: byTf['5m'],
+        candles15m: byTf['15m'],
+        orderBook: this.stateStore.state.orderBook,
+        analysisTimeframe: tf,
+      });
+
+      this.stateStore.setMarket(symbol, signal.market || {});
+      this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
+      await this.notifyPreSignal(signal, tf, lastClosed.time);
+      if (dispatchSignals) {
+        await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
+      }
+    }
+
+    const prev = this.directBots.get(symbol) || {};
+    this.setDirectBotState(symbol, {
+      inFlight: false,
+      state: gotClosed ? prev.state || 'IDLE' : 'IDLE',
+      lastRunAt: Date.now(),
+      lastError: null,
+    });
+
+    if (source === 'WATCHDOG') {
+      this.directBotRecoveryCount += 1;
+    }
+  }
+
+  async recoverInactiveDirectBots() {
+    if (!this.config.binance.scannerEnabled) return;
+    if (!this.config.binance.directBotWatchdogEnabled) return;
+    if (this.multiScanInFlight) return;
+    if (Date.now() < this.restBlockedUntil) return;
+    if (Date.now() < this.restGeoBlockedUntil) return;
+
+    this.directBotLastWatchdogAt = Date.now();
+    if (!this.multiScanTimer) {
+      this.startMultiSymbolScanner();
+      this.directBotRestartCount += 1;
+    }
+
+    const health = this.getDirectBotHealthSnapshot();
+    const stalled = health.stalledBots.sort((a, b) => (b.staleForMs || 0) - (a.staleForMs || 0));
+    if (!stalled.length) return;
+
+    const recoverPerTick = Math.max(1, Number(this.config.binance.directBotRecoverPerTick || 2));
+    const targets = stalled.slice(0, recoverPerTick).map((b) => b.symbol);
+
+    await Promise.allSettled(
+      targets.map(async (symbol) => {
+        await this.scanDirectSymbol(symbol, {
+          source: 'WATCHDOG',
+          dispatchSignals: true,
+        });
+      }),
+    );
+    this.emitEvent('status', this.getStatus());
+  }
+
   async runMultiSymbolScan() {
     if (this.multiScanInFlight) return;
     if (!this.config.binance.scannerEnabled) return;
     if (Date.now() < this.restBlockedUntil) return;
+    if (Date.now() < this.restGeoBlockedUntil) return;
     this.multiScanInFlight = true;
 
     try {
@@ -987,77 +1266,17 @@ class BotEngine {
       const candleLimit = Math.max(220, Number(this.config.binance.scannerCandleLimit || 260));
       await Promise.allSettled(
         symbols.map(async (symbol) => {
-          this.setDirectBotState(symbol, {
-            inFlight: true,
-            state: 'ANALYZING',
-            lastRunAt: Date.now(),
-          });
-          const datasets = await Promise.allSettled([
-            this.fetchKlines(symbol, '1m', candleLimit),
-            this.fetchKlines(symbol, '3m', candleLimit),
-            this.fetchKlines(symbol, '5m', candleLimit),
-            this.fetchKlines(symbol, '15m', candleLimit),
-          ]);
-
-          if (datasets.some((d) => d.status !== 'fulfilled')) {
-            const failed = datasets
-              .map((d, idx) => ({ d, tf: ['1m', '3m', '5m', '15m'][idx] }))
-              .filter((x) => x.d.status !== 'fulfilled')
-              .map((x) => `${x.tf}:${x.d.reason?.message || 'ERR'}`)
-              .join(' | ');
-            this.setDirectBotState(symbol, {
-              inFlight: false,
-              state: 'ERROR',
-              lastError: failed || 'SCAN_DATASET_FAILED',
-            });
-            return;
-          }
-
-          const byTf = {
-            '1m': datasets[0].value,
-            '3m': datasets[1].value,
-            '5m': datasets[2].value,
-            '15m': datasets[3].value,
-          };
-
-          for (const tf of ['1m', '3m', '5m', '15m']) {
-            this.stateStore.setCandles(symbol, tf, byTf[tf], this.config.timeframe.limit);
-          }
-
-          for (const tf of tfs) {
-            const closed = byTf[tf].filter((c) => c.isClosed);
-            if (!closed.length) continue;
-            const lastClosed = closed[closed.length - 1];
-            const closeKey = `${symbol}:${tf}`;
-            const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
-            if (lastClosed.time <= prevClose) continue;
-            this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
-
-            const signal = this.signalEngine.analyze({
-              symbol,
-              candles1m: byTf['1m'],
-              candles2m: byTf[tf],
-              candles5m: byTf['5m'],
-              candles15m: byTf['15m'],
-              orderBook: this.stateStore.state.orderBook,
-              analysisTimeframe: tf,
-            });
-
-            this.stateStore.setMarket(symbol, signal.market || {});
-            this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
-            await this.notifyPreSignal(signal, tf, lastClosed.time);
-            await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
-          }
-
-          this.setDirectBotState(symbol, {
-            inFlight: false,
-            state: 'IDLE',
-            lastError: null,
+          await this.scanDirectSymbol(symbol, {
+            source: 'SCANNER_BATCH',
+            timeframes: tfs,
+            candleLimit,
+            dispatchSignals: true,
           });
         }),
       );
     } finally {
       this.multiScanInFlight = false;
+      this.emitEvent('status', this.getStatus());
     }
   }
 
@@ -1792,8 +2011,8 @@ class BotEngine {
 
   getStatus() {
     const scannerSymbols = this.getScannerSymbols();
-    const directBotList = scannerSymbols.map((symbol) => this.directBots.get(symbol)).filter(Boolean);
-    const activeDirectBots = directBotList.filter((b) => b.state !== 'ERROR').length;
+    const health = this.getDirectBotHealthSnapshot();
+    const directBotList = health.bots;
     return {
       ...this.stateStore.getStatus(),
       priceSource: this.config.trading.priceSource,
@@ -1803,6 +2022,9 @@ class BotEngine {
         enabled: this.config.binance.scannerEnabled,
         loopMs: this.config.binance.scannerLoopMs,
         batchSize: this.config.binance.scannerBatchSize,
+        watchdogEnabled: this.config.binance.directBotWatchdogEnabled,
+        watchdogMs: this.config.binance.directBotWatchdogMs,
+        staleMs: health.staleMs,
         timeframes: this.getScannerTimeframes(),
         symbols: scannerSymbols,
         symbolCount: scannerSymbols.length,
@@ -1815,7 +2037,18 @@ class BotEngine {
         },
         directBots: {
           requestedCount: scannerSymbols.length,
-          runningCount: activeDirectBots,
+          runningCount: health.activeCount,
+          inactiveCount: health.inactiveCount,
+          stalledCount: health.stalledCount,
+          staleMs: health.staleMs,
+          watchdog: {
+            enabled: this.config.binance.directBotWatchdogEnabled,
+            watchdogMs: this.config.binance.directBotWatchdogMs,
+            recoverPerTick: this.config.binance.directBotRecoverPerTick,
+            lastRunAt: this.directBotLastWatchdogAt || 0,
+            recoveryCount: this.directBotRecoveryCount,
+            scannerRestartCount: this.directBotRestartCount,
+          },
           bots: directBotList,
         },
         telegramBots: {
