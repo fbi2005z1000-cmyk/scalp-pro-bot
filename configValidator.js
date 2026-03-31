@@ -60,6 +60,15 @@ function validateCoreConfig(config) {
   if (!Number.isFinite(t.preSignalEmitIntervalMs) || t.preSignalEmitIntervalMs < 1000) {
     errors.push('trading.preSignalEmitIntervalMs phai >= 1000');
   }
+  if (!Number.isFinite(t.preSignalLeadCandles1m) || t.preSignalLeadCandles1m < 1) {
+    errors.push('trading.preSignalLeadCandles1m phai >= 1');
+  }
+  if (!Number.isFinite(t.preSignalLeadCandles3m) || t.preSignalLeadCandles3m < 1) {
+    errors.push('trading.preSignalLeadCandles3m phai >= 1');
+  }
+  if (!Number.isFinite(t.preSignalLeadCandles5m) || t.preSignalLeadCandles5m < 1) {
+    errors.push('trading.preSignalLeadCandles5m phai >= 1');
+  }
   if (
     Number.isFinite(t.preSignalWatchDistancePct) &&
     Number.isFinite(t.preSignalArmDistancePct) &&

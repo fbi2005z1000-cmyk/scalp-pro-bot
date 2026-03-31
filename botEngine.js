@@ -738,6 +738,14 @@ class BotEngine {
     return ['1m', '3m', '5m'];
   }
 
+  getPreSignalLeadCandles(timeframe) {
+    const tf = String(timeframe || '').toLowerCase();
+    if (tf === '1m') return Math.max(1, Number(this.config.trading.preSignalLeadCandles1m || 2));
+    if (tf === '3m') return Math.max(1, Number(this.config.trading.preSignalLeadCandles3m || 1));
+    if (tf === '5m') return Math.max(1, Number(this.config.trading.preSignalLeadCandles5m || 1));
+    return Math.max(1, Number(this.config.telegram.preSignalMinCandles || 1));
+  }
+
   prunePreSignalDispatchMap() {
     const now = Date.now();
     const keepMs = 3 * 60 * 60 * 1000;
@@ -939,13 +947,12 @@ class BotEngine {
     const etaSec = Number(pre.etaSec || 0);
     if (!Number.isFinite(etaSec) || etaSec <= 0) return false;
 
-    const candleSec = this.timeframeToSec(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
-    const minEta = Math.max(candleSec * Number(this.config.telegram.preSignalMinCandles || 4), 30);
-    const maxEta = Math.max(
-      candleSec * (Number(this.config.telegram.preSignalMaxCandles || 4) + (pre.mode === 'EARLY_WATCH' ? 2 : 0)),
-      minEta,
-    );
-    if (etaSec < minEta || etaSec > maxEta) return false;
+    const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
+    const candleSec = this.timeframeToSec(tf);
+    const remainingCandles = Math.max(0, Math.ceil(etaSec / candleSec));
+    const leadCandles = this.getPreSignalLeadCandles(tf);
+    if (remainingCandles <= 0) return false;
+    if (remainingCandles > leadCandles) return false;
     return true;
   }
 
@@ -954,10 +961,12 @@ class BotEngine {
     const pre = signal.preSignal.selected;
     const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
     const tfSec = this.timeframeToSec(tf);
+    const leadCandles = this.getPreSignalLeadCandles(tf);
     const remainingCandlesRaw = Math.max(0, Math.ceil(Number(pre.etaSec || 0) / tfSec));
     const step = this.buildPreSignalCountdownStep(remainingCandlesRaw);
     if (step === null) return;
-    if (remainingCandlesRaw > 5) return;
+    if (remainingCandlesRaw <= 0) return;
+    if (remainingCandlesRaw > leadCandles) return;
 
     const campaignKey = this.buildPreSignalCampaignKey(signal, tf, pre);
     this.prunePreSignalDispatchMap();
@@ -1011,6 +1020,7 @@ class BotEngine {
       reasons: pre.reasons || [],
       liveStats,
       remainingCandles,
+      leadCandles,
       countdownStep: step,
       candleTime,
     });

@@ -591,17 +591,17 @@ class TelegramService {
     const normalized = String(side || '').toUpperCase();
     if (normalized === 'LONG') {
       return detailed
-        ? '🕯️ Nến vào lệnh ưu tiên: NẾN XANH xác nhận (đóng trên vùng entry, thân nến rõ).'
-        : '🕯️ Nến vào lệnh ưu tiên: NẾN XANH xác nhận';
+        ? '🕯️ Nến TRƯỚC điểm vào cần là NẾN XANH xác nhận (đóng trên vùng entry, thân nến rõ).'
+        : '🕯️ Nến trước điểm vào: ưu tiên NẾN XANH xác nhận';
     }
     if (normalized === 'SHORT') {
       return detailed
-        ? '🕯️ Nến vào lệnh ưu tiên: NẾN ĐỎ xác nhận (đóng dưới vùng entry, thân nến rõ).'
-        : '🕯️ Nến vào lệnh ưu tiên: NẾN ĐỎ xác nhận';
+        ? '🕯️ Nến TRƯỚC điểm vào cần là NẾN ĐỎ xác nhận (đóng dưới vùng entry, thân nến rõ).'
+        : '🕯️ Nến trước điểm vào: ưu tiên NẾN ĐỎ xác nhận';
     }
     return detailed
-      ? '🕯️ Nến vào lệnh: chờ nến xác nhận rõ ràng theo setup.'
-      : '🕯️ Nến vào lệnh: chờ nến xác nhận rõ ràng';
+      ? '🕯️ Nến trước điểm vào: chờ nến xác nhận rõ ràng theo setup.'
+      : '🕯️ Nến trước điểm vào: chờ nến xác nhận';
   }
 
   normalizeReasonText(text) {
@@ -679,6 +679,7 @@ class TelegramService {
         ? '✅ ĐẸP'
         : '⚠️ THEO DÕI';
     const remainingCandles = Number(preData.remainingCandles || 0);
+    const leadCandles = Math.max(1, Number(preData.leadCandles || 1));
     const countdownStep = Number.isFinite(Number(preData.countdownStep))
       ? Number(preData.countdownStep)
       : remainingCandles;
@@ -708,6 +709,7 @@ class TelegramService {
       `🟡 <b>KÈO ${stageText}</b> | ${icon} <b>${side}</b> | ${coinIcon} <b>${esc(preData.symbol || 'N/A')}</b> | <b>${esc(preData.timeframe || 'N/A')}</b>`,
       ``,
       `${countdownIcon} Còn: <b>${countdownText}</b> (${etaMin} phút)`,
+      `📌 Nhịp báo trước khung này: <b>${leadCandles} nến</b>`,
       this.buildEntryCandleColorText(side, true),
       `📍 Vùng trigger: <b>${fmtPrice(trigger)}</b>`,
       `🛑 SL dự kiến: <b>${fmtPrice(sl)}</b>`,
