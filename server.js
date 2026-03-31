@@ -1,5 +1,6 @@
 ﻿const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const cors = require('cors');
 
 const config = require('./config');
@@ -73,10 +74,40 @@ async function bootstrap() {
 
   app.use('/api', createApi({ botEngine, logger, statsService, glossary, stateStore, config }));
 
-  app.use(express.static(path.resolve(process.cwd(), 'frontend')));
+  const frontendDirCandidate = path.resolve(__dirname, '..', 'frontend');
+  const rootDirCandidate = path.resolve(__dirname, '..');
+  const frontendIndexCandidate = path.resolve(frontendDirCandidate, 'index.html');
+  const rootIndexCandidate = path.resolve(rootDirCandidate, 'index.html');
+
+  const useFrontendDir = fs.existsSync(frontendIndexCandidate);
+  const useRootDir = fs.existsSync(rootIndexCandidate);
+
+  const staticDir = useFrontendDir ? frontendDirCandidate : rootDirCandidate;
+  const frontendIndex = useFrontendDir ? frontendIndexCandidate : rootIndexCandidate;
+
+  if (!fs.existsSync(frontendIndex)) {
+    logger.warn('server', 'Không tìm thấy index.html (frontend hoặc root)', {
+      frontendDirCandidate,
+      frontendIndexCandidate,
+      rootDirCandidate,
+      rootIndexCandidate,
+      cwd: process.cwd(),
+    });
+  } else {
+    logger.info('server', 'Đã map static frontend', {
+      staticDir,
+      frontendIndex,
+      layout: useFrontendDir ? 'frontend-folder' : useRootDir ? 'root-files' : 'unknown',
+    });
+  }
+
+  app.use(express.static(staticDir));
 
   app.get('*', (req, res) => {
-    res.sendFile(path.resolve(process.cwd(), 'frontend', 'index.html'));
+    if (!fs.existsSync(frontendIndex)) {
+      return res.status(404).send('Frontend chưa được deploy đúng cấu trúc');
+    }
+    return res.sendFile(frontendIndex);
   });
 
   const server = app.listen(config.app.port, () => {
