@@ -65,6 +65,17 @@ class BotEngine {
     this.restCallWindow = [];
     this.restGeoBlockedUntil = 0;
     this.lastRestGeoLogAt = 0;
+    this.lastWsNotifyAt = 0;
+    this.wsHardErrorCount = 0;
+    this.lastWsHardErrorAt = 0;
+    this.wsCircuitTripCount = 0;
+    this.scannerWs = null;
+    this.scannerWsConnected = false;
+    this.scannerWsReconnectAttempt = 0;
+    this.scannerWsManualClose = false;
+    this.scannerWsLastMessageAt = 0;
+    this.scannerWsHealthTimer = null;
+    this.scannerWsReconnectTimer = null;
     this.bound = false;
   }
 
@@ -105,6 +116,35 @@ class BotEngine {
       msg.includes('EAI_AGAIN') ||
       msg.includes('REST_BLOCKED') ||
       msg.includes('REST_GEO_BLOCKED')
+    );
+  }
+
+  isTransientWsErrorMessage(message = '') {
+    const msg = String(message || '').toUpperCase();
+    return (
+      msg.includes('ECONNRESET') ||
+      msg.includes('ETIMEDOUT') ||
+      msg.includes('EAI_AGAIN') ||
+      msg.includes('1006') ||
+      msg.includes('CLOSED') ||
+      msg.includes('CONNECTION RESET') ||
+      msg.includes('PING')
+    );
+  }
+
+  isTransientRuntimeError(message = '') {
+    const msg = String(message || '').toUpperCase();
+    return (
+      this.isTransientWsErrorMessage(msg) ||
+      msg.includes('TELEGRAM') ||
+      msg.includes('REST_BLOCKED') ||
+      msg.includes('REST_GEO_BLOCKED') ||
+      msg.includes('STATUS CODE 418') ||
+      msg.includes('STATUS CODE 429') ||
+      msg.includes('STATUS CODE 451') ||
+      msg.includes('ECONNABORTED') ||
+      msg.includes('SOCKET HANG UP') ||
+      msg.includes('TIMEOUT')
     );
   }
 
@@ -290,23 +330,29 @@ class BotEngine {
     });
 
     this.websocketManager.on('reconnect', async ({ attempt, delay }) => {
-      this.logger.warn('websocket', 'Đang reconnect WS', { attempt, delay });
+      if (attempt >= 2) {
+        this.logger.info('websocket', 'Đang reconnect WS', { attempt, delay });
+      }
       this.emitEvent('status', this.getStatus());
-      await this.telegramService.sendError({
-        title: 'WebSocket Binance bị ngắt',
-        detail: `Reconnect lần ${attempt}, delay ${delay}ms`,
-      });
-      await this.orderManager.syncPosition();
+      try {
+        await this.orderManager.syncPosition();
+      } catch (error) {
+        this.logger.warn('websocket', 'Sync position sau reconnect thất bại', {
+          error: error.message,
+        });
+      }
     });
 
-    this.websocketManager.on('stale', async ({ staleForMs, staleDataMs }) => {
-      this.logger.warn('websocket', 'Phát hiện stale data', { staleForMs, staleDataMs });
-      this.riskManager.registerError('WS_STALE_DATA', `staleForMs=${staleForMs}`);
+    this.websocketManager.on('stale', async ({ staleForMs, staleDataMs, strike, shouldReconnect }) => {
+      if (shouldReconnect || Number(strike || 0) >= 4) {
+        this.logger.info('websocket', 'Phát hiện stale data', {
+          staleForMs,
+          staleDataMs,
+          strike: strike || 1,
+          shouldReconnect: Boolean(shouldReconnect),
+        });
+      }
       this.emitEvent('status', this.getStatus());
-      await this.telegramService.sendError({
-        title: 'WebSocket stale data',
-        detail: `Không có data mới trong ${staleForMs}ms (ngưỡng ${staleDataMs}ms)`,
-      });
     });
 
     this.websocketManager.on('gap', async ({ from, to, missingMinutes }) => {
@@ -318,36 +364,53 @@ class BotEngine {
       try {
         await this.bootstrapCandles(this.stateStore.state.symbol);
       } catch (error) {
-        this.riskManager.registerError('WS_GAP_BACKFILL', error.message);
+        if (!this.isTransientRestError(error)) {
+          this.logger.warn('websocket', 'Không backfill được sau gap', { error: error.message });
+        }
       }
     });
 
     this.websocketManager.on('circuit', async ({ attempt, cooldownMs }) => {
       this.logger.error('websocket', 'WS circuit breaker kích hoạt', { attempt, cooldownMs });
-      this.riskManager.activateEmergencyStop('WS_CIRCUIT_BREAKER', `attempt=${attempt}`);
-
-      if (this.stateStore.state.activePosition && this.config.risk.closePositionOnEmergency) {
-        const now = Date.now();
-        if (now - this.lastEmergencyHandledAt > 10000) {
-          this.lastEmergencyHandledAt = now;
-          await this.orderManager.forceClosePosition('EMERGENCY_STOP_WS_CIRCUIT');
-        }
+      this.wsCircuitTripCount += 1;
+      const now = Date.now();
+      if (now - this.lastWsNotifyAt > 120000) {
+        this.lastWsNotifyAt = now;
+        await this.telegramService.sendError({
+          title: 'WebSocket circuit breaker',
+          detail: `Reconnect thất bại nhiều lần, cooldown ${cooldownMs}ms (auto-recover, trip=${this.wsCircuitTripCount})`,
+        });
       }
-
-      await this.telegramService.sendError({
-        title: 'WebSocket circuit breaker',
-        detail: `Reconnect thất bại nhiều lần, cooldown ${cooldownMs}ms`,
-      });
     });
 
     this.websocketManager.on('error', async ({ error }) => {
-      this.stateStore.setError(error.message);
-      this.riskManager.registerError('WEBSOCKET', error.message);
-      this.emitEvent('error', { ts: Date.now(), error: error.message });
-      await this.telegramService.sendError({
-        title: 'WebSocket lỗi',
-        detail: error.message,
-      });
+      const message = String(error?.message || 'UNKNOWN_WS_ERROR');
+      this.stateStore.setError(message);
+
+      if (!this.isTransientWsErrorMessage(message)) {
+        const now = Date.now();
+        if (now - this.lastWsHardErrorAt > 180000) {
+          this.wsHardErrorCount = 0;
+        }
+        this.lastWsHardErrorAt = now;
+        this.wsHardErrorCount += 1;
+
+        if (this.wsHardErrorCount >= 8) {
+          this.riskManager.registerError('WEBSOCKET_HARD', message);
+          this.wsHardErrorCount = 0;
+        }
+      } else {
+        this.wsHardErrorCount = 0;
+      }
+      this.emitEvent('error', { ts: Date.now(), error: message });
+      const now = Date.now();
+      if (!this.isTransientWsErrorMessage(message) && now - this.lastWsNotifyAt > 120000) {
+        this.lastWsNotifyAt = now;
+        await this.telegramService.sendError({
+          title: 'WebSocket lỗi',
+          detail: message,
+        });
+      }
     });
   }
 
@@ -730,23 +793,28 @@ class BotEngine {
 
   shouldNotifyPreSignal(signal, timeframe, candleTime) {
     if (!this.config.telegram.preSignalEnabled) return false;
-    if (!signal || signal.side !== 'NO_TRADE') return false;
+    if (!signal) return false;
     if (this.stateStore.state.activePosition) return false;
 
     const pre = signal.preSignal?.selected;
     if (!pre) return false;
     if (!['LONG', 'SHORT'].includes(pre.side)) return false;
-    if (!['READY_SOON', 'ARMED'].includes(pre.mode)) return false;
+    if (!['EARLY_WATCH', 'READY_SOON', 'ARMED'].includes(pre.mode)) return false;
 
     const probability = Number(pre.probability || 0);
-    if (probability < Number(this.config.telegram.preSignalMinProbability || 78)) return false;
+    const baseMinProb = Number(this.config.telegram.preSignalMinProbability || 78);
+    const modeMinProb = pre.mode === 'EARLY_WATCH' ? baseMinProb + 8 : baseMinProb;
+    if (probability < modeMinProb) return false;
 
     const etaSec = Number(pre.etaSec || 0);
     if (!Number.isFinite(etaSec) || etaSec <= 0) return false;
 
     const candleSec = this.timeframeToSec(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
     const minEta = Math.max(candleSec * Number(this.config.telegram.preSignalMinCandles || 4), 30);
-    const maxEta = Math.max(candleSec * Number(this.config.telegram.preSignalMaxCandles || 4), minEta);
+    const maxEta = Math.max(
+      candleSec * (Number(this.config.telegram.preSignalMaxCandles || 4) + (pre.mode === 'EARLY_WATCH' ? 2 : 0)),
+      minEta,
+    );
     if (etaSec < minEta || etaSec > maxEta) return false;
 
     const triggerPrice = Number(pre.triggerPrice || 0);
@@ -755,7 +823,8 @@ class BotEngine {
     const band = Math.round(triggerPrice / Math.max(triggerPrice * 0.0005, 0.5));
     this.prunePreSignalDispatchMap();
     const closeKey = Number.isFinite(Number(candleTime)) ? Number(candleTime) : Math.floor(Date.now() / 1000);
-    const fingerprint = `${signal.symbol}:${timeframe}:${closeKey}:${pre.side}:${pre.mode}:${band}`;
+    const scoreBucket = Math.round(probability / 5);
+    const fingerprint = `${signal.symbol}:${timeframe}:${closeKey}:${pre.side}:${pre.mode}:${scoreBucket}:${band}`;
     if (this.preSignalDispatchMap.has(fingerprint)) return false;
     this.preSignalDispatchMap.set(fingerprint, Date.now());
     return true;
@@ -1051,6 +1120,33 @@ class BotEngine {
     this.directBotWatchdogTimer = null;
   }
 
+  startScannerWsHealthMonitor() {
+    this.stopScannerWsHealthMonitor();
+    const tickMs = 5000;
+    this.scannerWsHealthTimer = setInterval(() => {
+      if (!this.scannerWsConnected || !this.scannerWs || this.scannerWsManualClose) return;
+      const staleFor = Date.now() - Number(this.scannerWsLastMessageAt || 0);
+      const staleLimit = Math.max(20000, Number(this.config.websocket.staleDataMs || 12000) * 2);
+      if (staleFor > staleLimit) {
+        this.logger.warn('scanner-ws', 'Scanner WS stale, terminate để reconnect', {
+          staleForMs: staleFor,
+          staleLimitMs: staleLimit,
+        });
+        try {
+          this.scannerWs.terminate();
+        } catch (_) {
+          // ignore
+        }
+      }
+    }, tickMs);
+  }
+
+  stopScannerWsHealthMonitor() {
+    if (!this.scannerWsHealthTimer) return;
+    clearInterval(this.scannerWsHealthTimer);
+    this.scannerWsHealthTimer = null;
+  }
+
   buildScannerWsUrl() {
     const symbols = this.getScannerSymbols();
     const tfs = this.getScannerTimeframes();
@@ -1072,15 +1168,21 @@ class BotEngine {
     const symbols = this.getScannerSymbols();
     if (!symbols.length) return;
 
-    this.scannerWsManualClose = false;
+    if (this.scannerWsReconnectTimer) {
+      clearTimeout(this.scannerWsReconnectTimer);
+      this.scannerWsReconnectTimer = null;
+    }
+    this.stopScannerWsHealthMonitor();
     if (this.scannerWs) {
+      this.scannerWsManualClose = true;
       try {
-        this.scannerWs.close();
+        this.scannerWs.terminate();
       } catch (_) {
         // ignore
       }
       this.scannerWs = null;
     }
+    this.scannerWsManualClose = false;
 
     const url = this.buildScannerWsUrl();
     this.scannerWs = new WebSocket(url);
@@ -1093,6 +1195,7 @@ class BotEngine {
         symbols: symbols.length,
         timeframes: this.getScannerTimeframes(),
       });
+      this.startScannerWsHealthMonitor();
       this.emitEvent('status', this.getStatus());
     });
 
@@ -1103,6 +1206,7 @@ class BotEngine {
 
     this.scannerWs.on('close', () => {
       this.scannerWsConnected = false;
+      this.stopScannerWsHealthMonitor();
       this.emitEvent('status', this.getStatus());
       if (!this.scannerWsManualClose) {
         this.scheduleScannerWsReconnect();
@@ -1115,9 +1219,11 @@ class BotEngine {
   }
 
   scheduleScannerWsReconnect() {
+    if (this.scannerWsReconnectTimer) return;
     this.scannerWsReconnectAttempt += 1;
     const delay = Math.min(2000 * this.scannerWsReconnectAttempt, 20000);
-    setTimeout(() => {
+    this.scannerWsReconnectTimer = setTimeout(() => {
+      this.scannerWsReconnectTimer = null;
       if (!this.scannerWsManualClose) {
         this.connectScannerMarketStream();
       }
@@ -1800,9 +1906,7 @@ class BotEngine {
           breakdown: signal.confidenceBreakdown,
         });
 
-        if (candle.isClosed) {
-          await this.notifyPreSignal(signal, analysisTf, candle.time);
-        }
+        await this.notifyPreSignal(signal, analysisTf, candle.time);
 
         const hasNetPositiveTp1 = (() => {
           const entry = Number(signal.entryPrice || 0);
@@ -1834,14 +1938,21 @@ class BotEngine {
       this.emitEvent('status', this.getStatus());
       this.riskManager.registerHealthyTick();
     } catch (error) {
-      this.stateStore.setError(error.message);
+      const message = String(error?.message || 'UNKNOWN_ON_KLINE_ERROR');
+      this.stateStore.setError(message);
+      if (this.isTransientRuntimeError(message)) {
+        this.logger.warn('bot', 'Lỗi tạm thời onKline, bot tiếp tục chạy', { error: message });
+        this.emitEvent('error', { ts: Date.now(), error: message, transient: true });
+        return;
+      }
+
       this.trySetState(BOT_STATES.ERROR, { source: 'on_kline_error' });
-      this.logger.error('bot', 'Lỗi onKline', { error: error.message });
-      this.riskManager.registerError('ON_KLINE', error.message);
-      this.emitEvent('error', { ts: Date.now(), error: error.message });
+      this.logger.error('bot', 'Lỗi onKline', { error: message });
+      this.riskManager.registerError('ON_KLINE', message);
+      this.emitEvent('error', { ts: Date.now(), error: message, transient: false });
       await this.telegramService.sendError({
         title: 'Lỗi phân tích kline',
-        detail: error.message,
+        detail: message,
       });
     }
   }

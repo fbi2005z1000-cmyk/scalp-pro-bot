@@ -42,10 +42,12 @@
     directKlineWs: null,
     directKlineToken: 0,
     directKlineConnected: false,
+    directReconcileTimer: null,
     fleetHydrationInProgress: false,
     fleetHydrationDone: false,
     fleetHydrationAt: 0,
     lastFullRenderAt: 0,
+    candleCountdownText: '--:--',
     snapshotMode: new URLSearchParams(window.location.search).get('snapshot') === '1',
     adminToken: localStorage.getItem('ADMIN_TOKEN') || '',
   };
@@ -86,6 +88,7 @@
     toggleNewbie: document.getElementById('toggleNewbie'),
     chartContainer: document.getElementById('chartContainer'),
     chartFootNote: document.getElementById('chartFootNote'),
+    candleCountdownBadge: document.getElementById('candleCountdownBadge'),
     indicatorLegend: document.getElementById('indicatorLegend'),
     logContainer: document.getElementById('logContainer'),
     fleetBadge: document.getElementById('fleetBadge'),
@@ -259,6 +262,16 @@
     return Number(n).toFixed(digits);
   }
 
+  function formatPrice(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return 'N/A';
+    const abs = Math.abs(v);
+    if (abs >= 1000) return v.toFixed(2);
+    if (abs >= 100) return v.toFixed(3);
+    if (abs >= 1) return v.toFixed(4);
+    return v.toFixed(5);
+  }
+
   function formatEtaSec(sec) {
     if (!Number.isFinite(Number(sec))) return 'N/A';
     const s = Math.max(0, Math.round(Number(sec)));
@@ -280,6 +293,61 @@
     const h = Math.floor(m / 60);
     const rm = m % 60;
     return rm ? `${h}h ${rm}m` : `${h}h`;
+  }
+
+  function timeframeToSec(tf) {
+    const m = String(tf || '').toLowerCase().match(/^(\d+)m$/);
+    if (!m) return 60;
+    const mins = Number(m[1] || 1);
+    if (!Number.isFinite(mins) || mins <= 0) return 60;
+    return mins * 60;
+  }
+
+  function formatCountdown(totalSec) {
+    const s = Math.max(0, Math.round(Number(totalSec || 0)));
+    const mm = Math.floor(s / 60)
+      .toString()
+      .padStart(2, '0');
+    const ss = (s % 60).toString().padStart(2, '0');
+    return `${mm}:${ss}`;
+  }
+
+  function getCurrentDisplayPrice() {
+    const c = latestDisplayCandle();
+    if (c && Number.isFinite(Number(c.close))) return Number(c.close);
+    const p = Number(
+      state.livePrice ||
+        state.status?.orderBook?.lastPrice ||
+        state.status?.orderBook?.lastTradePrice ||
+        state.status?.orderBook?.markPrice ||
+        state.candles[state.candles.length - 1]?.close ||
+        0,
+    );
+    return Number.isFinite(p) ? p : 0;
+  }
+
+  function updateCandleCountdown() {
+    const tfSec = timeframeToSec(state.timeframe);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const last = latestDisplayCandle();
+
+    let nextCloseSec;
+    if (last && Number.isFinite(Number(last.time))) {
+      const start = Number(last.time);
+      nextCloseSec = start + tfSec;
+      if (nextCloseSec <= nowSec) {
+        nextCloseSec = Math.floor(nowSec / tfSec) * tfSec + tfSec;
+      }
+    } else {
+      nextCloseSec = Math.floor(nowSec / tfSec) * tfSec + tfSec;
+    }
+
+    const remain = Math.max(0, nextCloseSec - nowSec);
+    state.candleCountdownText = formatCountdown(remain);
+    if (el.candleCountdownBadge) {
+      el.candleCountdownBadge.textContent = `Nến còn: ${state.candleCountdownText}`;
+      el.candleCountdownBadge.className = remain <= 10 ? 'badge warn' : 'badge neutral';
+    }
   }
 
   function hasNum(v) {
@@ -528,6 +596,10 @@
     const c = latestDisplayCandle();
     if (!c) return;
 
+    if (Number.isFinite(Number(c.close))) {
+      state.livePrice = Number(c.close);
+    }
+
     candleSeries.update(c);
     if (state.toggles.volume) {
       volumeSeries.update({
@@ -536,6 +608,8 @@
         color: c.close >= c.open ? 'rgba(22,196,127,0.45)' : 'rgba(234,84,85,0.45)',
       });
     }
+    updateCandleCountdown();
+    updateChartFootPriceOnly();
   }
 
   function applyIncomingCandle(timeframe, candle) {
@@ -1099,7 +1173,7 @@
       const txt = document.createElement('span');
       txt.className = 'ma-mini-text';
       txt.style.borderColor = `${t.color}99`;
-      txt.textContent = `${t.label} ${formatNum(price, 2)}`;
+      txt.textContent = `${t.label} ${formatPrice(price)}`;
 
       wrap.appendChild(dot);
       wrap.appendChild(txt);
@@ -1207,14 +1281,17 @@
     const ma200Latest = ma200Data.length ? ma200Data[ma200Data.length - 1].value : null;
     const rsiLatest = rsiPoints.length ? rsiPoints[rsiPoints.length - 1].value : null;
     const closeLatest = candles.length ? candles[candles.length - 1].close : null;
+    if (Number.isFinite(Number(closeLatest))) {
+      state.livePrice = Number(closeLatest);
+    }
     if (el.indicatorLegend) {
       el.indicatorLegend.textContent = [
         `Khung: ${state.timeframe}`,
-        `Close: ${formatNum(closeLatest, 2)}`,
-        `MA7: ${formatNum(ma7Latest, 2)}`,
-        `MA25: ${formatNum(ma25Latest, 2)}`,
-        `MA99: ${formatNum(ma99Latest, 2)}`,
-        `MA200: ${formatNum(ma200Latest, 2)}`,
+        `Close: ${formatPrice(closeLatest)}`,
+        `MA7: ${formatPrice(ma7Latest)}`,
+        `MA25: ${formatPrice(ma25Latest)}`,
+        `MA99: ${formatPrice(ma99Latest)}`,
+        `MA200: ${formatPrice(ma200Latest)}`,
         `RSI14: ${formatNum(rsiLatest, 2)}`,
       ].join(' | ');
     }
@@ -1227,6 +1304,7 @@
       lastTime: candles.length ? candles[candles.length - 1].time : null,
     };
     drawMaMiniTags();
+    updateCandleCountdown();
 
     window.__chartReady = true;
   }
@@ -1443,7 +1521,7 @@
     el.botStateBadge.textContent = status.stateMachine;
 
     const staleMs = Date.now() - (state.lastTickTs || 0);
-    const connected = (state.streamConnected || state.directKlineConnected) && staleMs < 2500;
+    const connected = (state.streamConnected || state.directKlineConnected) && staleMs < 10000;
 
     el.connectionBadge.className = connected ? 'badge long' : 'badge warn';
     if (connected) el.connectionBadge.textContent = 'Realtime tốt';
@@ -1464,8 +1542,8 @@
       ? `Vị thế: ${status.activePosition.side} @ ${formatNum(status.activePosition.entryPrice)}`
       : 'Không có vị thế mở';
 
-    const refPrice = state.livePrice || status.orderBook?.lastPrice || state.candles[state.candles.length - 1]?.close;
-    const priceText = refPrice ? `Giá(${state.priceSource}): ${formatNum(refPrice, 2)}` : `Giá(${state.priceSource}): N/A`;
+    const refPrice = getCurrentDisplayPrice();
+    const priceText = refPrice ? `Giá(${state.priceSource}): ${formatPrice(refPrice)}` : `Giá(${state.priceSource}): N/A`;
     const i = getLatestIndicatorSnapshot();
     const indicatorText = `RSI14: ${formatNum(i.rsi, 2)} | MA7: ${formatNum(i.ma7, 2)} | MA25: ${formatNum(i.ma25, 2)} | MA99: ${formatNum(i.ma99, 2)} | MA200: ${formatNum(i.ma200, 2)}`;
     const tzText = `TZ: ${state.timezoneMode}`;
@@ -1474,9 +1552,32 @@
     const riskLocked = status.stateMachine === 'PAUSED_BY_RISK' || status.risk?.lockedByRisk;
     el.killSwitchBtn.textContent = riskLocked ? 'Mở Khóa Risk Lock' : 'Kill Switch';
 
-    el.chartFootNote.textContent = `${cooldownText} | ${pos} | ${priceText} | ${indicatorText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
+    updateCandleCountdown();
+    el.chartFootNote.textContent = `${cooldownText} | Nến còn: ${state.candleCountdownText} | ${pos} | ${priceText} | ${indicatorText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
     renderRsGuidePanel();
     renderFleet(status);
+  }
+
+  function updateChartFootCountdownOnly() {
+    if (!el.chartFootNote) return;
+    updateCandleCountdown();
+    const text = String(el.chartFootNote.textContent || '');
+    if (!text) return;
+    if (text.includes('Nến còn:')) {
+      el.chartFootNote.textContent = text.replace(/Nến còn:\s\d{2}:\d{2}/, `Nến còn: ${state.candleCountdownText}`);
+    }
+  }
+
+  function updateChartFootPriceOnly() {
+    if (!el.chartFootNote) return;
+    const price = getCurrentDisplayPrice();
+    if (!price) return;
+    const text = String(el.chartFootNote.textContent || '');
+    if (!text || !text.includes('Giá(')) return;
+    const next = text.replace(/Giá\([A-Z]+\):\s[0-9.]+/, `Giá(${state.priceSource}): ${formatPrice(price)}`);
+    if (next !== text) {
+      el.chartFootNote.textContent = next;
+    }
   }
 
   function syncSymbolSelectFromStatus(status) {
@@ -1847,9 +1948,35 @@
     }));
   }
 
+  function stopDirectCandleReconciler() {
+    if (!state.directReconcileTimer) return;
+    clearInterval(state.directReconcileTimer);
+    state.directReconcileTimer = null;
+  }
+
+  function startDirectCandleReconciler() {
+    stopDirectCandleReconciler();
+    state.directReconcileTimer = setInterval(async () => {
+      try {
+        const fresh = await fetchBinanceKlinesDirect(state.symbol, state.timeframe, 60);
+        if (!Array.isArray(fresh) || !fresh.length) return;
+        const normalized = normalizeCandles(fresh, 700);
+        if (state.timeframe === '1m') state.candles1m = normalized.slice();
+        else if (state.timeframe === '3m') state.candles3m = normalized.slice();
+        else if (state.timeframe === '5m') state.candles5m = normalized.slice();
+        else if (state.timeframe === '15m') state.candles15m = normalized.slice();
+        recalcDisplayCandles();
+        renderChart();
+      } catch (_) {
+        // im lặng: reconciliation chỉ là self-heal chống lệch
+      }
+    }, 6000);
+  }
+
   function closeDirectKlineStream() {
     state.directKlineToken += 1;
     state.directKlineConnected = false;
+    stopDirectCandleReconciler();
     if (state.directKlineWs) {
       try {
         state.directKlineWs.close();
@@ -1875,6 +2002,7 @@
       ws.onopen = () => {
         if (token !== state.directKlineToken) return;
         state.directKlineConnected = true;
+        startDirectCandleReconciler();
       };
 
       ws.onmessage = (event) => {
@@ -1898,6 +2026,8 @@
             isClosed: Boolean(k.x),
           };
           if (!Number.isFinite(candle.time)) return;
+
+          state.livePrice = Number(candle.close);
 
           applyIncomingCandle(tf, candle);
           state.lastTickTs = Date.now();
@@ -1934,7 +2064,7 @@
         state.directKlineConnected = false;
         setTimeout(() => {
           if (token === state.directKlineToken) connectDirectKlineStream();
-        }, 900);
+        }, 350);
       };
     } catch (error) {
       console.error('Không thể mở direct kline ws', error);
@@ -1996,10 +2126,12 @@
           scheduleChartRender(false);
         }
       } else if (packet.type === 'trade') {
+        if (state.directKlineConnected && state.priceSource === 'LAST') return;
         const p = Number(packet.payload.price || 0);
         if (p > 0) state.livePrice = p;
         if (state.status) renderStatus(state.status);
       } else if (packet.type === 'book' || packet.type === 'mark') {
+        if (state.directKlineConnected && state.priceSource === 'LAST') return;
         const p = Number(packet.payload.lastPrice || packet.payload.markPrice || 0);
         if (p > 0) state.livePrice = p;
         if (state.status) renderStatus(state.status);
@@ -2246,9 +2378,13 @@
       scheduleChartRender(true);
     }
 
+    setInterval(() => {
+      updateChartFootCountdownOnly();
+    }, 1000);
+
     // fallback nếu stream bị chập chờn
     setInterval(async () => {
-      if (Date.now() - state.lastTickTs > 8000) {
+      if (Date.now() - state.lastTickTs > 5000) {
         try {
           await loadSingleTimeframe(state.timeframe, true, true);
           recalcDisplayCandles();
@@ -2258,7 +2394,7 @@
           console.error(error);
         }
       }
-    }, 9000);
+    }, 5000);
   }
 
   window.addEventListener('beforeunload', () => {

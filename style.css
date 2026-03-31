@@ -273,6 +273,7 @@ button:hover {
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
 }
 
 .panel-head h2 {
@@ -650,6 +651,11 @@ button:hover {
   margin-top: 8px;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+#candleCountdownBadge {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
 }
 
 .switch-group {

@@ -12,6 +12,8 @@ class WebsocketManager {
     this.manualClose = false;
     this.lastMessageAt = 0;
     this.lastPongAt = 0;
+    this.staleStrikeCount = 0;
+    this.pongStrikeCount = 0;
     this.lastKlineTimeByTf = {};
     this.heartbeatTimer = null;
     this.circuitOpenUntil = 0;
@@ -38,7 +40,15 @@ class WebsocketManager {
     const list = this.handlers[eventName] || [];
     for (const cb of list) {
       try {
-        cb(payload);
+        const result = cb(payload);
+        if (result && typeof result.then === 'function') {
+          result.catch((error) => {
+            this.logger.error('websocket', 'Lỗi callback WS (async)', {
+              error: error.message,
+              eventName,
+            });
+          });
+        }
       } catch (error) {
         this.logger.error('websocket', 'Lỗi callback WS', { error: error.message, eventName });
       }
@@ -85,22 +95,25 @@ class WebsocketManager {
       this.reconnectAttempt = 0;
       this.lastMessageAt = Date.now();
       this.lastPongAt = Date.now();
+      this.staleStrikeCount = 0;
+      this.pongStrikeCount = 0;
       this.logger.info('websocket', 'Đã kết nối Binance WS', { symbol });
       this.startHeartbeat();
     });
 
     this.ws.on('message', (raw) => {
       this.lastMessageAt = Date.now();
+      this.staleStrikeCount = 0;
       this.handleMessage(raw.toString());
     });
 
     this.ws.on('pong', () => {
       this.lastPongAt = Date.now();
+      this.pongStrikeCount = 0;
     });
 
     this.ws.on('close', () => {
       this.clearHeartbeat();
-      this.logger.warn('websocket', 'WS đã đóng', { symbol });
       if (!this.manualClose) {
         this.scheduleReconnect();
       }
@@ -146,7 +159,7 @@ class WebsocketManager {
       return;
     }
 
-    const delay = Math.min(1800 * this.reconnectAttempt, 16000);
+    const delay = Math.min(900 * this.reconnectAttempt, 12000);
 
     this.stateStore.registerReconnect();
     this.emit('reconnect', { attempt: this.reconnectAttempt, delay });
@@ -160,8 +173,8 @@ class WebsocketManager {
 
   startHeartbeat() {
     this.clearHeartbeat();
-    const tick = Math.max(800, this.config.websocket.heartbeatIntervalMs);
-    const staleMs = Math.max(1200, this.config.websocket.staleDataMs);
+    const tick = Math.max(1200, this.config.websocket.heartbeatIntervalMs);
+    const staleMs = Math.max(3000, this.config.websocket.staleDataMs);
 
     this.heartbeatTimer = setInterval(() => {
       const now = Date.now();
@@ -169,28 +182,27 @@ class WebsocketManager {
 
       const staleFor = now - this.lastMessageAt;
       if (staleFor > staleMs) {
+        this.staleStrikeCount += 1;
+        const shouldReconnect = this.staleStrikeCount >= 5;
         this.emit('stale', {
           symbol: this.symbol,
           staleForMs: staleFor,
           staleDataMs: staleMs,
+          strike: this.staleStrikeCount,
+          shouldReconnect,
         });
-        this.logger.warn('websocket', 'Phát hiện stale data, chủ động reconnect', {
-          symbol: this.symbol,
-          staleForMs: staleFor,
-        });
-        this.ws.terminate();
+        if (shouldReconnect) {
+          this.logger.info('websocket', 'Stale data liên tiếp, tự reconnect', {
+            symbol: this.symbol,
+            staleForMs: staleFor,
+            strike: this.staleStrikeCount,
+          });
+          this.staleStrikeCount = 0;
+          this.ws.terminate();
+        }
         return;
       }
-
-      const pongStale = now - this.lastPongAt;
-      if (pongStale > staleMs * 1.8) {
-        this.logger.warn('websocket', 'Không nhận pong đúng hạn, reconnect', {
-          symbol: this.symbol,
-          pongStaleMs: pongStale,
-        });
-        this.ws.terminate();
-        return;
-      }
+      this.staleStrikeCount = 0;
 
       try {
         this.ws.ping();
