@@ -57,6 +57,12 @@ function validateCoreConfig(config) {
   if (!inRange(t.preSignalMinProbability, 0, 100)) {
     errors.push('trading.preSignalMinProbability phai trong [0,100]');
   }
+  if (!inRange(t.preSignalPack1MinProbability, 0, 100)) {
+    errors.push('trading.preSignalPack1MinProbability phai trong [0,100]');
+  }
+  if (!inRange(t.preSignalPack2MinScore, 0, 100)) {
+    errors.push('trading.preSignalPack2MinScore phai trong [0,100]');
+  }
   if (!Number.isFinite(t.preSignalEmitIntervalMs) || t.preSignalEmitIntervalMs < 1000) {
     errors.push('trading.preSignalEmitIntervalMs phai >= 1000');
   }
@@ -172,6 +178,22 @@ function validateCoreConfig(config) {
   }
   if (!Number.isFinite(ws.maxReconnectAttempts) || ws.maxReconnectAttempts < 1) {
     errors.push('websocket.maxReconnectAttempts phai >= 1');
+  }
+
+  const sp = config.selfPing || {};
+  if (sp.enabled) {
+    if (!Number.isFinite(sp.intervalMs) || sp.intervalMs < 60000) {
+      errors.push('selfPing.intervalMs phai >= 60000');
+    }
+    if (!Number.isFinite(sp.retryMs) || sp.retryMs < 1000) {
+      errors.push('selfPing.retryMs phai >= 1000');
+    }
+    if (!Number.isFinite(sp.timeoutMs) || sp.timeoutMs < 1000) {
+      errors.push('selfPing.timeoutMs phai >= 1000');
+    }
+    if (!sp.url || !/^https?:\/\//i.test(String(sp.url))) {
+      errors.push('selfPing.url phai la URL hop le bat dau bang http/https');
+    }
   }
 
   const b = config.binance || {};

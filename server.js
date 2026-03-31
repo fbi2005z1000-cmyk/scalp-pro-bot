@@ -1,6 +1,5 @@
-const express = require('express');
+﻿const express = require('express');
 const path = require('path');
-const fs = require('fs');
 const cors = require('cors');
 
 const config = require('./config');
@@ -15,6 +14,7 @@ const TelegramService = require('./telegramService');
 const ChartSnapshot = require('./chartSnapshot');
 const StatsService = require('./statsService');
 const ReportService = require('./reportService');
+const SelfPingService = require('./selfPingService');
 const BotEngine = require('./botEngine');
 const createApi = require('./api');
 const glossary = require('./glossary');
@@ -23,7 +23,7 @@ async function bootstrap() {
   const startupValidation = validateStartupConfig(config);
   if (!startupValidation.ok) {
     throw new Error(
-      `Cấu hình khởi động không hợp lệ:\n- ${startupValidation.errors.join('\n- ')}`,
+      `Cấu hình khởi động không hợp lệ:\\n- ${startupValidation.errors.join('\\n- ')}`,
     );
   }
 
@@ -61,6 +61,7 @@ async function bootstrap() {
   });
 
   const reportService = new ReportService(config, logger, statsService, telegramService, stateStore);
+  const selfPingService = new SelfPingService(config, logger);
 
   await botEngine.initialize();
   reportService.start();
@@ -72,24 +73,10 @@ async function bootstrap() {
 
   app.use('/api', createApi({ botEngine, logger, statsService, glossary, stateStore, config }));
 
-  // Render/GitHub có thể để frontend ở /frontend hoặc ở root
-  const cwd = process.cwd();
-  const frontendDir = path.resolve(cwd, 'frontend');
-  const rootDir = path.resolve(cwd);
-  const hasFrontendIndex = fs.existsSync(path.join(frontendDir, 'index.html'));
+  app.use(express.static(path.resolve(process.cwd(), 'frontend')));
 
-  const staticDir = hasFrontendIndex ? frontendDir : rootDir;
-  const indexFile = hasFrontendIndex
-    ? path.join(frontendDir, 'index.html')
-    : path.join(rootDir, 'index.html');
-
-  app.use(express.static(staticDir));
-
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api')) return next();
-    res.sendFile(indexFile, (err) => {
-      if (err) next();
-    });
+  app.get('*', (req, res) => {
+    res.sendFile(path.resolve(process.cwd(), 'frontend', 'index.html'));
   });
 
   const server = app.listen(config.app.port, () => {
@@ -97,9 +84,8 @@ async function bootstrap() {
       mode: config.mode,
       symbol: config.binance.symbol,
       testnet: config.binance.useTestnet,
-      staticDir,
-      indexFile,
     });
+    selfPingService.start();
   });
 
   server.on('error', (error) => {
@@ -110,6 +96,7 @@ async function bootstrap() {
   const shutdown = async () => {
     logger.warn('server', 'Đang tắt bot...');
     reportService.stop();
+    selfPingService.stop();
     persistenceService.stopAutoSave();
     persistenceService.save(stateStore.state);
     websocketManager.disconnect();

@@ -51,12 +51,47 @@ const parseSymbols = (symbols) => {
 };
 
 const configuredSymbols = parseSymbols(process.env.SYMBOLS);
+const resolvedPort = toNumber(process.env.PORT, 3000);
+
+const normalizeUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+  return `https://${raw}`;
+};
+
+const deriveSelfPingBaseUrl = () => {
+  const explicit = normalizeUrl(process.env.PUBLIC_BASE_URL || '');
+  if (explicit) return explicit;
+
+  const renderExternal = normalizeUrl(process.env.RENDER_EXTERNAL_URL || '');
+  if (renderExternal) return renderExternal;
+
+  const railwayStatic = normalizeUrl(process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || '');
+  if (railwayStatic) return railwayStatic;
+
+  return `http://127.0.0.1:${resolvedPort}`;
+};
+
+const explicitSelfPingUrl = normalizeUrl(process.env.SELF_PING_URL || '');
+const selfPingBaseUrl = deriveSelfPingBaseUrl();
+const selfPingPath = String(process.env.SELF_PING_PATH || '/api/health').trim() || '/api/health';
+const selfPingUrl =
+  explicitSelfPingUrl ||
+  `${selfPingBaseUrl.replace(/\/+$/, '')}${selfPingPath.startsWith('/') ? '' : '/'}${selfPingPath}`;
 
 const config = {
   app: {
     name: process.env.APP_NAME || 'Scalp Pro Bot',
-    port: toNumber(process.env.PORT, 3000),
+    port: resolvedPort,
     env: process.env.NODE_ENV || 'development',
+  },
+  selfPing: {
+    enabled: process.env.SELF_PING_ENABLED === 'true',
+    intervalMs: toNumber(process.env.SELF_PING_INTERVAL_MS, 240000),
+    retryMs: toNumber(process.env.SELF_PING_RETRY_MS, 5000),
+    timeoutMs: toNumber(process.env.SELF_PING_TIMEOUT_MS, 4000),
+    url: selfPingUrl,
   },
   security: {
     adminToken: process.env.ADMIN_TOKEN || '',
@@ -125,6 +160,10 @@ const config = {
     preSignalWatchDistancePct: toNumber(process.env.PRE_SIGNAL_WATCH_DISTANCE_PCT, 0.0052),
     preSignalArmDistancePct: toNumber(process.env.PRE_SIGNAL_ARM_DISTANCE_PCT, 0.0016),
     preSignalEmitIntervalMs: toNumber(process.env.PRE_SIGNAL_EMIT_INTERVAL_MS, 4000),
+    preSignalPack1MinProbability: toNumber(process.env.PRE_SIGNAL_PACK1_MIN_PROBABILITY, 60),
+    preSignalPack2MinScore: toNumber(process.env.PRE_SIGNAL_PACK2_MIN_SCORE, 68),
+    preSignalRequireConsensus: process.env.PRE_SIGNAL_REQUIRE_CONSENSUS !== 'false',
+    entryConfirmRequirePack2: process.env.ENTRY_CONFIRM_REQUIRE_PACK2 !== 'false',
     preSignalLeadCandles1m: toNumber(process.env.PRE_SIGNAL_LEAD_1M, 2),
     preSignalLeadCandles3m: toNumber(process.env.PRE_SIGNAL_LEAD_3M, 1),
     preSignalLeadCandles5m: toNumber(process.env.PRE_SIGNAL_LEAD_5M, 1),
