@@ -19,11 +19,11 @@ class SelfPingService {
   start() {
     if (!this.enabled) return;
     if (!this.url) {
-      this.logger.warn('self-ping', 'SELF_PING_ENABLED=true nhưng chưa có URL ping, bỏ qua self-ping');
+      this.logger.warn('self-ping', 'SELF_PING_ENABLED=true but ping URL is empty, skip self-ping');
       return;
     }
     this.stopped = false;
-    this.logger.info('self-ping', 'Bật self-ping', {
+    this.logger.info('self-ping', 'Self-ping started', {
       url: this.url,
       intervalMs: this.intervalMs,
       retryMs: this.retryMs,
@@ -38,7 +38,7 @@ class SelfPingService {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    this.logger.info('self-ping', 'Đã tắt self-ping', {
+    this.logger.info('self-ping', 'Self-ping stopped', {
       okCount: this.okCount,
       failCount: this.failCount,
       lastOkAt: this.lastOkAt,
@@ -70,7 +70,7 @@ class SelfPingService {
       if (resp.status >= 200 && resp.status < 300) {
         this.okCount += 1;
         this.lastOkAt = new Date().toISOString();
-        this.logger.info('self-ping', 'Ping thành công', {
+        this.logger.info('self-ping', 'Ping success', {
           status: resp.status,
           latencyMs: Date.now() - startedAt,
           okCount: this.okCount,
@@ -78,19 +78,21 @@ class SelfPingService {
         this.#schedule(this.intervalMs);
       } else {
         this.failCount += 1;
-        this.logger.warn('self-ping', 'Ping lỗi HTTP, sẽ retry sau 5s', {
+        this.logger.warn('self-ping', 'Ping HTTP error, retry in 5s', {
           status: resp.status,
           latencyMs: Date.now() - startedAt,
           failCount: this.failCount,
+          url: this.url,
         });
         this.#schedule(this.retryMs);
       }
     } catch (error) {
       this.failCount += 1;
-      this.logger.warn('self-ping', 'Ping thất bại, sẽ retry sau 5s', {
+      this.logger.warn('self-ping', 'Ping failed, retry in 5s', {
         error: error.message,
         latencyMs: Date.now() - startedAt,
         failCount: this.failCount,
+        url: this.url,
       });
       this.#schedule(this.retryMs);
     } finally {

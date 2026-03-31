@@ -60,6 +60,25 @@ const normalizeUrl = (value) => {
   return `https://${raw}`;
 };
 
+const withPathIfMissing = (baseOrUrl, pathValue) => {
+  const normalized = normalizeUrl(baseOrUrl);
+  if (!normalized) return '';
+  const safePath = String(pathValue || '/api/health').trim() || '/api/health';
+  try {
+    const urlObj = new URL(normalized);
+    const hasMeaningfulPath =
+      Boolean(urlObj.pathname && urlObj.pathname !== '/' && urlObj.pathname.trim() !== '');
+    if (!hasMeaningfulPath) {
+      urlObj.pathname = safePath.startsWith('/') ? safePath : `/${safePath}`;
+    }
+    return urlObj.toString().replace(/\/+$/, '');
+  } catch (error) {
+    const joinPath = safePath.startsWith('/') ? safePath : `/${safePath}`;
+    const cleanedBase = normalized.replace(/\/+$/, '');
+    return `${cleanedBase}${joinPath}`;
+  }
+};
+
 const deriveSelfPingBaseUrl = () => {
   const explicit = normalizeUrl(process.env.PUBLIC_BASE_URL || '');
   if (explicit) return explicit;
@@ -77,8 +96,8 @@ const explicitSelfPingUrl = normalizeUrl(process.env.SELF_PING_URL || '');
 const selfPingBaseUrl = deriveSelfPingBaseUrl();
 const selfPingPath = String(process.env.SELF_PING_PATH || '/api/health').trim() || '/api/health';
 const selfPingUrl =
-  explicitSelfPingUrl ||
-  `${selfPingBaseUrl.replace(/\/+$/, '')}${selfPingPath.startsWith('/') ? '' : '/'}${selfPingPath}`;
+  (explicitSelfPingUrl ? withPathIfMissing(explicitSelfPingUrl, selfPingPath) : '') ||
+  withPathIfMissing(selfPingBaseUrl, selfPingPath);
 
 const config = {
   app: {
