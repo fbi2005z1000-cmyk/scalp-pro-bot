@@ -1,0 +1,192 @@
+﻿<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TUẤN ANH BOT Dashboard</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar glass">
+        <div class="brand-wrap">
+          <div class="brand-row">
+            <div class="brand-logo-3d" aria-hidden="true">
+              <span class="face front">TA</span>
+              <span class="face glow"></span>
+            </div>
+            <h1 class="brand-title">TUẤN ANH BOT</h1>
+          </div>
+          <p class="brand-subtitle">BOT DỰ ĐOÁN-AUTO TRADE BY TUẤN ANH</p>
+        </div>
+        <div class="top-controls">
+          <label>Coin tổng
+            <select id="symbolSelect">
+              <option value="BTCUSDT">BTCUSDT</option>
+              <option value="ETHUSDT">ETHUSDT</option>
+              <option value="SOLUSDT">SOLUSDT</option>
+              <option value="BNBUSDT">BNBUSDT</option>
+              <option value="XRPUSDT">XRPUSDT</option>
+              <option value="DOGEUSDT">DOGEUSDT</option>
+              <option value="ADAUSDT">ADAUSDT</option>
+              <option value="TRXUSDT">TRXUSDT</option>
+              <option value="LINKUSDT">LINKUSDT</option>
+              <option value="MATICUSDT">MATICUSDT</option>
+              <option value="AVAXUSDT">AVAXUSDT</option>
+              <option value="LTCUSDT">LTCUSDT</option>
+              <option value="DOTUSDT">DOTUSDT</option>
+              <option value="ATOMUSDT">ATOMUSDT</option>
+            </select>
+          </label>
+          <label>Khung
+            <select id="timeframeSelect">
+              <option value="1m" selected>1m</option>
+              <option value="3m">3m (gốc Binance)</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+            </select>
+          </label>
+          <label>Nguồn giá
+            <select id="priceSourceSelect">
+              <option value="LAST" selected>LAST</option>
+              <option value="MARK">MARK</option>
+            </select>
+          </label>
+          <label>Timezone
+            <select id="timezoneSelect">
+              <option value="LOCAL" selected>LOCAL</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </label>
+          <div class="status-inline">
+            <span>Kết nối WS:</span>
+            <strong id="connectionBadge" class="badge warn">Đang kiểm tra</strong>
+          </div>
+          <div class="status-inline">
+            <span>Trạng thái bot:</span>
+            <strong id="botStateBadge" class="badge neutral">IDLE</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout-grid">
+        <section class="panel glass rs-guide-panel">
+          <div class="panel-head">
+            <h2>Bảng R/S & Gợi Ý Bắt Lệnh</h2>
+            <span class="badge neutral" id="rsGuidePriceNow">Giá hiện tại: N/A</span>
+          </div>
+          <div class="rs-guide-wrap">
+            <div class="rs-guide-col">
+              <h3>R1/R2/R3 và S1/S2/S3 là gì?</h3>
+              <div id="rsMeaningGrid" class="rs-meaning-grid"></div>
+              <div id="rsScenarioBox" class="note-box rs-scenario-box">
+                Chờ dữ liệu vùng hỗ trợ/kháng cự...
+              </div>
+            </div>
+            <div class="rs-guide-col">
+              <h3>Thông Báo Bắt Lệnh Hiện Tại</h3>
+              <div id="livePlanGrid" class="live-plan-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="chart-card" class="panel glass chart-panel">
+          <div class="panel-head">
+            <h2>Biểu Đồ Realtime</h2>
+            <div class="switch-group">
+              <label><input type="checkbox" id="toggleMA" checked /> MA</label>
+              <label><input type="checkbox" id="toggleRSI" checked /> RSI</label>
+              <label><input type="checkbox" id="toggleVolume" checked /> Volume</label>
+              <label><input type="checkbox" id="toggleMarkers" checked /> Marker</label>
+              <label><input type="checkbox" id="toggleZones" checked /> Entry/SL/TP</label>
+              <label><input type="checkbox" id="toggleNewbie" checked /> Chế độ người mới</label>
+            </div>
+          </div>
+          <div id="chartContainer" class="chart-area"></div>
+          <div id="indicatorLegend" class="indicator-legend">MA(7/25/99/200) | RSI(14): đang tải...</div>
+          <div id="volumeContainer" class="volume-area"></div>
+          <div id="rsiContainer" class="rsi-area"></div>
+          <div class="chart-foot" id="chartFootNote">
+            Chờ dữ liệu...
+          </div>
+        </section>
+
+        <section class="panel glass signal-panel">
+          <div class="panel-head">
+            <h2>Tín Hiệu</h2>
+            <span id="signalType" class="badge neutral">NO TRADE</span>
+          </div>
+          <div class="signal-grid" id="signalGrid"></div>
+          <div class="note-box" id="signalReason">Chưa có tín hiệu mới.</div>
+          <div class="note-box newbie" id="newbieHint">Bật chế độ người mới để xem giải thích dễ hiểu.</div>
+        </section>
+
+        <section class="panel glass pressure-panel">
+          <div class="panel-head">
+            <h2>Lực Thị Trường</h2>
+          </div>
+          <div class="kv" id="pressureGrid"></div>
+          <div class="quick-warning" id="quickWarning"></div>
+        </section>
+
+        <section class="panel glass control-panel">
+          <div class="panel-head">
+            <h2>Điều Khiển Bot</h2>
+          </div>
+          <div class="control-grid">
+            <label>Mode
+              <select id="modeSelect">
+                <option value="SIGNAL_ONLY">SIGNAL ONLY</option>
+                <option value="SEMI_AUTO">SEMI AUTO</option>
+                <option value="AUTO_BOT">AUTO BOT</option>
+              </select>
+            </label>
+            <label>Risk/Lệnh (%)
+              <input id="riskPerTradeInput" type="number" step="0.001" min="0.005" max="0.05" value="0.008" />
+            </label>
+            <label>Max lỗ ngày (%)
+              <input id="dailyLossInput" type="number" step="0.005" min="0.01" max="0.2" value="0.05" />
+            </label>
+            <label>Max lệnh/giờ
+              <input id="maxTradesHourInput" type="number" min="1" max="30" value="5" />
+            </label>
+          </div>
+          <div class="btn-row">
+            <button id="startBtn" class="btn success">Bật Bot</button>
+            <button id="stopBtn" class="btn danger">Dừng Bot</button>
+            <button id="confirmTradeBtn" class="btn warning">Xác Nhận Lệnh (Semi)</button>
+            <button id="killSwitchBtn" class="btn ghost">Kill Switch</button>
+            <button id="applyConfigBtn" class="btn">Cập Nhật Cấu Hình</button>
+          </div>
+        </section>
+
+        <section class="panel glass stats-panel">
+          <div class="panel-head">
+            <h2>Thống Kê</h2>
+          </div>
+          <div id="statsGrid" class="stats-grid"></div>
+        </section>
+
+        <section class="panel glass glossary-panel">
+          <div class="panel-head">
+            <h2>Giải Thích Nhanh</h2>
+          </div>
+          <div id="glossaryContainer" class="glossary-list"></div>
+        </section>
+
+        <section class="panel glass log-panel">
+          <div class="panel-head">
+            <h2>Log Realtime</h2>
+          </div>
+          <div id="logContainer" class="log-container"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/helpTooltip.js"></script>
+    <script src="/glossaryPanel.js"></script>
+    <script src="/statsPanel.js"></script>
+    <script src="/script.js"></script>
+  </body>
+</html>
