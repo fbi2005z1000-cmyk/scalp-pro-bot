@@ -103,6 +103,152 @@ class IndicatorService {
     return atr;
   }
 
+  static macd(values, fast = 12, slow = 26, signal = 9) {
+    if (!Array.isArray(values) || values.length < slow + signal) {
+      return {
+        macdLine: new Array(values?.length || 0).fill(null),
+        signalLine: new Array(values?.length || 0).fill(null),
+        histogram: new Array(values?.length || 0).fill(null),
+      };
+    }
+
+    const fastEma = this.ema(values, fast);
+    const slowEma = this.ema(values, slow);
+    const macdLine = new Array(values.length).fill(null);
+    for (let i = 0; i < values.length; i += 1) {
+      if (fastEma[i] === null || slowEma[i] === null) continue;
+      macdLine[i] = fastEma[i] - slowEma[i];
+    }
+
+    const compactMacd = macdLine.map((v) => (v === null ? 0 : v));
+    const signalLineRaw = this.ema(compactMacd, signal);
+    const signalLine = signalLineRaw.map((v, i) => (macdLine[i] === null ? null : v));
+    const histogram = new Array(values.length).fill(null);
+    for (let i = 0; i < values.length; i += 1) {
+      if (macdLine[i] === null || signalLine[i] === null) continue;
+      histogram[i] = macdLine[i] - signalLine[i];
+    }
+
+    return { macdLine, signalLine, histogram };
+  }
+
+  static bollinger(values, period = 20, stdMult = 2) {
+    if (!Array.isArray(values) || values.length < period) {
+      return {
+        middle: new Array(values?.length || 0).fill(null),
+        upper: new Array(values?.length || 0).fill(null),
+        lower: new Array(values?.length || 0).fill(null),
+        bandwidth: new Array(values?.length || 0).fill(null),
+      };
+    }
+
+    const middle = this.sma(values, period);
+    const upper = new Array(values.length).fill(null);
+    const lower = new Array(values.length).fill(null);
+    const bandwidth = new Array(values.length).fill(null);
+
+    for (let i = period - 1; i < values.length; i += 1) {
+      const window = values.slice(i - period + 1, i + 1);
+      const m = middle[i];
+      if (!Number.isFinite(m) || m === 0) continue;
+      const variance = average(window.map((v) => (v - m) ** 2));
+      const std = Math.sqrt(Math.max(variance, 0));
+      upper[i] = m + stdMult * std;
+      lower[i] = m - stdMult * std;
+      bandwidth[i] = (upper[i] - lower[i]) / m;
+    }
+
+    return { middle, upper, lower, bandwidth };
+  }
+
+  static adx(candles, period = 14) {
+    if (!Array.isArray(candles) || candles.length < period * 2 + 2) {
+      const len = candles?.length || 0;
+      return {
+        adx: new Array(len).fill(null),
+        plusDI: new Array(len).fill(null),
+        minusDI: new Array(len).fill(null),
+      };
+    }
+
+    const len = candles.length;
+    const tr = new Array(len).fill(null);
+    const plusDM = new Array(len).fill(0);
+    const minusDM = new Array(len).fill(0);
+
+    for (let i = 1; i < len; i += 1) {
+      const highDiff = candles[i].high - candles[i - 1].high;
+      const lowDiff = candles[i - 1].low - candles[i].low;
+      plusDM[i] = highDiff > lowDiff && highDiff > 0 ? highDiff : 0;
+      minusDM[i] = lowDiff > highDiff && lowDiff > 0 ? lowDiff : 0;
+
+      tr[i] = Math.max(
+        candles[i].high - candles[i].low,
+        Math.abs(candles[i].high - candles[i - 1].close),
+        Math.abs(candles[i].low - candles[i - 1].close),
+      );
+    }
+
+    const smoothTR = new Array(len).fill(null);
+    const smoothPlusDM = new Array(len).fill(null);
+    const smoothMinusDM = new Array(len).fill(null);
+    const plusDI = new Array(len).fill(null);
+    const minusDI = new Array(len).fill(null);
+    const dx = new Array(len).fill(null);
+    const adx = new Array(len).fill(null);
+
+    let trSeed = 0;
+    let plusSeed = 0;
+    let minusSeed = 0;
+    for (let i = 1; i <= period; i += 1) {
+      trSeed += tr[i] || 0;
+      plusSeed += plusDM[i] || 0;
+      minusSeed += minusDM[i] || 0;
+    }
+
+    smoothTR[period] = trSeed;
+    smoothPlusDM[period] = plusSeed;
+    smoothMinusDM[period] = minusSeed;
+
+    for (let i = period + 1; i < len; i += 1) {
+      smoothTR[i] = (smoothTR[i - 1] || 0) - (smoothTR[i - 1] || 0) / period + (tr[i] || 0);
+      smoothPlusDM[i] =
+        (smoothPlusDM[i - 1] || 0) - (smoothPlusDM[i - 1] || 0) / period + (plusDM[i] || 0);
+      smoothMinusDM[i] =
+        (smoothMinusDM[i - 1] || 0) - (smoothMinusDM[i - 1] || 0) / period + (minusDM[i] || 0);
+    }
+
+    for (let i = period; i < len; i += 1) {
+      const trv = smoothTR[i] || 0;
+      if (trv <= 0) continue;
+      plusDI[i] = ((smoothPlusDM[i] || 0) / trv) * 100;
+      minusDI[i] = ((smoothMinusDM[i] || 0) / trv) * 100;
+      const denom = (plusDI[i] || 0) + (minusDI[i] || 0);
+      if (denom <= 0) continue;
+      dx[i] = (Math.abs((plusDI[i] || 0) - (minusDI[i] || 0)) / denom) * 100;
+    }
+
+    let adxSeed = 0;
+    let adxCount = 0;
+    const adxStart = period * 2;
+    for (let i = period; i < adxStart && i < len; i += 1) {
+      if (Number.isFinite(dx[i])) {
+        adxSeed += dx[i];
+        adxCount += 1;
+      }
+    }
+    if (adxCount > 0 && adxStart < len) {
+      adx[adxStart] = adxSeed / adxCount;
+    }
+
+    for (let i = adxStart + 1; i < len; i += 1) {
+      if (!Number.isFinite(dx[i])) continue;
+      adx[i] = ((adx[i - 1] || 0) * (period - 1) + dx[i]) / period;
+    }
+
+    return { adx, plusDI, minusDI };
+  }
+
   static calcVolumeStatus(candles, lookback = 6) {
     const volumes = candles.map((c) => c.volume || 0);
     const current = volumes[volumes.length - 1] || 0;
@@ -258,8 +404,12 @@ class IndicatorService {
     const ma99 = this.sma(closes, 99);
     const ma200 = this.sma(closes, 200);
     const ema20 = this.ema(closes, 20);
+    const ema50 = this.ema(closes, 50);
     const rsi14 = this.rsi(closes, 14);
     const atr14 = this.atr(candles, 14);
+    const macd = this.macd(closes, 12, 26, 9);
+    const bb = this.bollinger(closes, 20, 2);
+    const adxPack = this.adx(candles, 14);
 
     const latestIndex = candles.length - 1;
 
@@ -269,16 +419,38 @@ class IndicatorService {
       ma99,
       ma200,
       ema20,
+      ema50,
       rsi14,
       atr14,
+      macdLine: macd.macdLine,
+      macdSignal: macd.signalLine,
+      macdHist: macd.histogram,
+      bbMiddle: bb.middle,
+      bbUpper: bb.upper,
+      bbLower: bb.lower,
+      bbBandwidth: bb.bandwidth,
+      adx: adxPack.adx,
+      plusDI: adxPack.plusDI,
+      minusDI: adxPack.minusDI,
       latest: {
         ma7: ma7[latestIndex],
         ma25: ma25[latestIndex],
         ma99: ma99[latestIndex],
         ma200: ma200[latestIndex],
         ema20: ema20[latestIndex],
+        ema50: ema50[latestIndex],
         rsi14: rsi14[latestIndex],
         atr14: atr14[latestIndex],
+        macd: macd.macdLine[latestIndex],
+        macdSignal: macd.signalLine[latestIndex],
+        macdHist: macd.histogram[latestIndex],
+        bbUpper: bb.upper[latestIndex],
+        bbLower: bb.lower[latestIndex],
+        bbMiddle: bb.middle[latestIndex],
+        bbBandwidth: bb.bandwidth[latestIndex],
+        adx: adxPack.adx[latestIndex],
+        plusDI: adxPack.plusDI[latestIndex],
+        minusDI: adxPack.minusDI[latestIndex],
         ma7Slope: calcSlope(ma7.filter((v) => v !== null), 5),
         ma25Slope: calcSlope(ma25.filter((v) => v !== null), 5),
         ma99Slope: calcSlope(ma99.filter((v) => v !== null), 6),

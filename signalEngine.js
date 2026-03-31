@@ -32,6 +32,10 @@ class SignalEngine {
       'FOMO_DISTANCE_MA25',
       'FOMO_BREAKOUT',
       'BOS_AGAINST_TREND',
+      'WEAK_TREND_STRENGTH',
+      'BOLLINGER_SQUEEZE',
+      'MACD_CONFLICT',
+      'STRICT_QUALITY_GATE',
     ]);
     return hardCodes.has(code);
   }
@@ -325,6 +329,13 @@ class SignalEngine {
       ma2m: ind2m.latest,
       ma5m: ind5m.latest,
       ma15m: ind15m.latest,
+      adx2m: ind2m.latest.adx,
+      plusDI2m: ind2m.latest.plusDI,
+      minusDI2m: ind2m.latest.minusDI,
+      bbBandwidth2m: ind2m.latest.bbBandwidth,
+      macd2m: ind2m.latest.macd,
+      macdSignal2m: ind2m.latest.macdSignal,
+      macdHist2m: ind2m.latest.macdHist,
       spreadPct,
       distanceToMA25,
       keyLevels,
@@ -358,6 +369,7 @@ class SignalEngine {
       prev2,
       candles2m,
       ind2m,
+      ind5m,
       ind15m,
       trendResult,
       trend15mResult,
@@ -826,6 +838,7 @@ class SignalEngine {
       latest2,
       candles2m,
       ind2m,
+      ind5m,
       trendResult,
       trend15mResult,
       candleInsight,
@@ -907,6 +920,53 @@ class SignalEngine {
       breakdown.structure -= 15;
       this.addReject(rejects, rejectCodes, 'BOS_AGAINST_TREND', 'BOS ngược trend, không LONG');
       hardRejectSet.add('BOS_AGAINST_TREND');
+    }
+
+    const adx = Number(ind2m.latest.adx || ind5m?.latest?.adx || 0);
+    const plusDI = Number(ind2m.latest.plusDI || 0);
+    const minusDI = Number(ind2m.latest.minusDI || 0);
+    const bbBandwidth = Number(ind2m.latest.bbBandwidth || 0);
+    const macdHist = Number(ind2m.latest.macdHist || 0);
+    const macd = Number(ind2m.latest.macd || 0);
+    const macdSignal = Number(ind2m.latest.macdSignal || 0);
+
+    if (!Number.isFinite(adx) || adx < this.config.trading.minAdx) {
+      breakdown.trend -= 12;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'WEAK_TREND_STRENGTH',
+        `ADX yếu (${Number.isFinite(adx) ? adx.toFixed(1) : 'N/A'}), chặn LONG`,
+      );
+      hardRejectSet.add('WEAK_TREND_STRENGTH');
+    } else if (plusDI > minusDI) {
+      breakdown.trend += 8;
+      reasons.push(`ADX mạnh (${adx.toFixed(1)}), DMI ủng hộ LONG`);
+    } else {
+      breakdown.structure -= 8;
+      this.addReject(rejects, rejectCodes, 'DMI_CONFLICT', 'DMI chưa ủng hộ LONG');
+    }
+
+    if (Number.isFinite(bbBandwidth) && bbBandwidth <= this.config.trading.bbSqueezeMax) {
+      breakdown.noisePenalty -= 12;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'BOLLINGER_SQUEEZE',
+        `Bollinger đang siết chặt (${(bbBandwidth * 100).toFixed(2)}%), dễ nhiễu`,
+      );
+      hardRejectSet.add('BOLLINGER_SQUEEZE');
+    }
+
+    if (this.config.trading.macdConfirmRequired) {
+      if (macdHist > 0 && macd >= macdSignal) {
+        breakdown.maMomentum += 8;
+        reasons.push('MACD xác nhận động lượng tăng');
+      } else {
+        breakdown.maMomentum -= 10;
+        this.addReject(rejects, rejectCodes, 'MACD_CONFLICT', 'MACD chưa xác nhận LONG');
+        hardRejectSet.add('MACD_CONFLICT');
+      }
     }
 
     if (trendResult.trend === 'UP') {
@@ -1152,10 +1212,33 @@ class SignalEngine {
 
     const score = clamp(Object.values(breakdown).reduce((sum, v) => sum + v, 0), 0, 100);
     const uniqueRejectCodes = [...new Set(rejectCodes)];
+
+    if (this.config.trading.strictNoTrashMode) {
+      const strictGateSet = new Set([
+        'LOW_VOLUME',
+        'WEAK_ORDERFLOW',
+        'RSI_NOT_READY',
+        'DMI_CONFLICT',
+        'HIGH_SPREAD',
+        'LOW_VOLATILITY',
+      ]);
+      const blocked = uniqueRejectCodes.filter((code) => strictGateSet.has(code));
+      if (blocked.length) {
+        blocked.forEach((code) => hardRejectSet.add(code));
+        this.addReject(
+          rejects,
+          rejectCodes,
+          'STRICT_QUALITY_GATE',
+          `Strict gate chặn LONG do: ${blocked.join(', ')}`,
+        );
+      }
+    }
+
     const hardRejectCodes = uniqueRejectCodes.filter(
       (code) => hardRejectSet.has(code) || this.isHardRejectCode(code),
     );
     const hardBlocked = hardRejectCodes.length > 0;
+    const maxSoftRejects = this.config.trading.strictNoTrashMode ? 1 : 5;
 
     return {
       side: 'LONG',
@@ -1167,7 +1250,7 @@ class SignalEngine {
       hardRejectCodes,
       hardBlocked,
       risks,
-      allowed: rejects.length <= 5 && !hardBlocked,
+      allowed: rejects.length <= maxSoftRejects && !hardBlocked,
     };
   }
 
@@ -1176,6 +1259,7 @@ class SignalEngine {
       latest2,
       candles2m,
       ind2m,
+      ind5m,
       trendResult,
       trend15mResult,
       candleInsight,
@@ -1257,6 +1341,53 @@ class SignalEngine {
       breakdown.structure -= 15;
       this.addReject(rejects, rejectCodes, 'BOS_AGAINST_TREND', 'BOS ngược trend, không SHORT');
       hardRejectSet.add('BOS_AGAINST_TREND');
+    }
+
+    const adx = Number(ind2m.latest.adx || ind5m?.latest?.adx || 0);
+    const plusDI = Number(ind2m.latest.plusDI || 0);
+    const minusDI = Number(ind2m.latest.minusDI || 0);
+    const bbBandwidth = Number(ind2m.latest.bbBandwidth || 0);
+    const macdHist = Number(ind2m.latest.macdHist || 0);
+    const macd = Number(ind2m.latest.macd || 0);
+    const macdSignal = Number(ind2m.latest.macdSignal || 0);
+
+    if (!Number.isFinite(adx) || adx < this.config.trading.minAdx) {
+      breakdown.trend -= 12;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'WEAK_TREND_STRENGTH',
+        `ADX yếu (${Number.isFinite(adx) ? adx.toFixed(1) : 'N/A'}), chặn SHORT`,
+      );
+      hardRejectSet.add('WEAK_TREND_STRENGTH');
+    } else if (minusDI > plusDI) {
+      breakdown.trend += 8;
+      reasons.push(`ADX mạnh (${adx.toFixed(1)}), DMI ủng hộ SHORT`);
+    } else {
+      breakdown.structure -= 8;
+      this.addReject(rejects, rejectCodes, 'DMI_CONFLICT', 'DMI chưa ủng hộ SHORT');
+    }
+
+    if (Number.isFinite(bbBandwidth) && bbBandwidth <= this.config.trading.bbSqueezeMax) {
+      breakdown.noisePenalty -= 12;
+      this.addReject(
+        rejects,
+        rejectCodes,
+        'BOLLINGER_SQUEEZE',
+        `Bollinger đang siết chặt (${(bbBandwidth * 100).toFixed(2)}%), dễ nhiễu`,
+      );
+      hardRejectSet.add('BOLLINGER_SQUEEZE');
+    }
+
+    if (this.config.trading.macdConfirmRequired) {
+      if (macdHist < 0 && macd <= macdSignal) {
+        breakdown.maMomentum += 8;
+        reasons.push('MACD xác nhận động lượng giảm');
+      } else {
+        breakdown.maMomentum -= 10;
+        this.addReject(rejects, rejectCodes, 'MACD_CONFLICT', 'MACD chưa xác nhận SHORT');
+        hardRejectSet.add('MACD_CONFLICT');
+      }
     }
 
     if (trendResult.trend === 'DOWN') {
@@ -1502,10 +1633,33 @@ class SignalEngine {
 
     const score = clamp(Object.values(breakdown).reduce((sum, v) => sum + v, 0), 0, 100);
     const uniqueRejectCodes = [...new Set(rejectCodes)];
+
+    if (this.config.trading.strictNoTrashMode) {
+      const strictGateSet = new Set([
+        'LOW_VOLUME',
+        'WEAK_ORDERFLOW',
+        'RSI_NOT_READY',
+        'DMI_CONFLICT',
+        'HIGH_SPREAD',
+        'LOW_VOLATILITY',
+      ]);
+      const blocked = uniqueRejectCodes.filter((code) => strictGateSet.has(code));
+      if (blocked.length) {
+        blocked.forEach((code) => hardRejectSet.add(code));
+        this.addReject(
+          rejects,
+          rejectCodes,
+          'STRICT_QUALITY_GATE',
+          `Strict gate chặn SHORT do: ${blocked.join(', ')}`,
+        );
+      }
+    }
+
     const hardRejectCodes = uniqueRejectCodes.filter(
       (code) => hardRejectSet.has(code) || this.isHardRejectCode(code),
     );
     const hardBlocked = hardRejectCodes.length > 0;
+    const maxSoftRejects = this.config.trading.strictNoTrashMode ? 1 : 5;
 
     return {
       side: 'SHORT',
@@ -1517,7 +1671,7 @@ class SignalEngine {
       hardRejectCodes,
       hardBlocked,
       risks,
-      allowed: rejects.length <= 5 && !hardBlocked,
+      allowed: rejects.length <= maxSoftRejects && !hardBlocked,
     };
   }
 

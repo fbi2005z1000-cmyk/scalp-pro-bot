@@ -91,6 +91,12 @@ function validateCoreConfig(config) {
   if (!inRange(t.oversoldShortRsi, 0, 50)) {
     errors.push('trading.oversoldShortRsi phai trong [0,50]');
   }
+  if (!inRange(t.minAdx, 5, 60)) {
+    errors.push('trading.minAdx phai trong [5,60]');
+  }
+  if (!Number.isFinite(t.bbSqueezeMax) || t.bbSqueezeMax < 0) {
+    errors.push('trading.bbSqueezeMax phai la so khong am');
+  }
   if (Number.isFinite(t.overboughtLongRsi) && Number.isFinite(t.oversoldShortRsi) && t.overboughtLongRsi <= t.oversoldShortRsi) {
     errors.push('trading.overboughtLongRsi phai lon hon oversoldShortRsi');
   }
