@@ -1,5 +1,6 @@
-﻿const express = require('express');
+const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const cors = require('cors');
 
 const config = require('./config');
@@ -22,7 +23,7 @@ async function bootstrap() {
   const startupValidation = validateStartupConfig(config);
   if (!startupValidation.ok) {
     throw new Error(
-      `Cấu hình khởi động không hợp lệ:\\n- ${startupValidation.errors.join('\\n- ')}`,
+      `Cấu hình khởi động không hợp lệ:\n- ${startupValidation.errors.join('\n- ')}`,
     );
   }
 
@@ -71,10 +72,24 @@ async function bootstrap() {
 
   app.use('/api', createApi({ botEngine, logger, statsService, glossary, stateStore, config }));
 
-  app.use(express.static(path.resolve(process.cwd(), 'frontend')));
+  // Render/GitHub có thể để frontend ở /frontend hoặc ở root
+  const cwd = process.cwd();
+  const frontendDir = path.resolve(cwd, 'frontend');
+  const rootDir = path.resolve(cwd);
+  const hasFrontendIndex = fs.existsSync(path.join(frontendDir, 'index.html'));
 
-  app.get('*', (req, res) => {
-    res.sendFile(path.resolve(process.cwd(), 'frontend', 'index.html'));
+  const staticDir = hasFrontendIndex ? frontendDir : rootDir;
+  const indexFile = hasFrontendIndex
+    ? path.join(frontendDir, 'index.html')
+    : path.join(rootDir, 'index.html');
+
+  app.use(express.static(staticDir));
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(indexFile, (err) => {
+      if (err) next();
+    });
   });
 
   const server = app.listen(config.app.port, () => {
@@ -82,6 +97,8 @@ async function bootstrap() {
       mode: config.mode,
       symbol: config.binance.symbol,
       testnet: config.binance.useTestnet,
+      staticDir,
+      indexFile,
     });
   });
 
