@@ -50,6 +50,8 @@ const parseSymbols = (symbols) => {
   return parseSymbolList(symbols);
 };
 
+const configuredSymbols = parseSymbols(process.env.SYMBOLS);
+
 const config = {
   app: {
     name: process.env.APP_NAME || 'Scalp Pro Bot',
@@ -77,7 +79,7 @@ const config = {
         ? 'wss://stream.binancefuture.com/stream'
         : 'wss://fstream.binance.com/stream'),
     symbol: (process.env.DEFAULT_SYMBOL || 'BTCUSDT').toUpperCase(),
-    symbols: parseSymbols(process.env.SYMBOLS),
+    symbols: configuredSymbols,
     leverage: toNumber(process.env.DEFAULT_LEVERAGE, 10),
     recvWindow: toNumber(process.env.BINANCE_RECV_WINDOW, 5000),
     restSoftLimitPerMin: toNumber(process.env.BINANCE_REST_SOFT_LIMIT_PER_MIN, 180),
@@ -87,7 +89,7 @@ const config = {
     restClosedSyncMinGapMs: toNumber(process.env.REST_CLOSED_SYNC_MIN_GAP_MS, 12000),
     scannerEnabled: process.env.MULTI_SCANNER_ENABLED !== 'false',
     scannerLoopMs: toNumber(process.env.MULTI_SCANNER_LOOP_MS, 8000),
-    scannerBatchSize: toNumber(process.env.MULTI_SCANNER_BATCH_SIZE, 3),
+    scannerBatchSize: toNumber(process.env.MULTI_SCANNER_BATCH_SIZE, Math.max(1, configuredSymbols.length)),
     scannerCandleLimit: toNumber(process.env.MULTI_SCANNER_CANDLE_LIMIT, 260),
     scannerBootstrapBatchSize: toNumber(process.env.MULTI_SCANNER_BOOTSTRAP_BATCH_SIZE, 3),
     scannerBootstrapDelayMs: toNumber(process.env.MULTI_SCANNER_BOOTSTRAP_DELAY_MS, 180),

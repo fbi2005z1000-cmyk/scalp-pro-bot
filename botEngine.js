@@ -48,6 +48,7 @@ class BotEngine {
     this.multiScanLastCloseByKey = new Map();
     this.multiScanLastSignalByKey = new Map();
     this.multiScanCursor = 0;
+    this.directBots = new Map();
     this.positionPulseTimer = null;
     this.positionPulseEndAt = 0;
     this.positionPulseLastPrice = null;
@@ -155,6 +156,7 @@ class BotEngine {
     if (this.stateStore.state.mode === 'SIGNAL_ONLY') {
       this.stateStore.setBotRunning(true);
     }
+    this.initializeDirectBots();
     await this.bootstrapCandles(this.stateStore.state.symbol);
     await this.bootstrapScannerSymbols();
     this.bindWebsocket();
@@ -763,6 +765,78 @@ class BotEngine {
     return normalized;
   }
 
+  initializeDirectBots() {
+    const symbols = this.getScannerSymbols();
+    for (const symbol of symbols) {
+      this.directBots.set(symbol, {
+        symbol,
+        state: 'IDLE',
+        timeframe: null,
+        inFlight: false,
+        analysisCount: 0,
+        signalCount: 0,
+        rejectCount: 0,
+        lastRunAt: 0,
+        lastSignalAt: 0,
+        lastSignal: null,
+        lastRejectCode: null,
+        lastError: null,
+      });
+    }
+  }
+
+  setDirectBotState(symbol, patch = {}) {
+    const base =
+      this.directBots.get(symbol) ||
+      {
+        symbol,
+        state: 'IDLE',
+        timeframe: null,
+        inFlight: false,
+        analysisCount: 0,
+        signalCount: 0,
+        rejectCount: 0,
+        lastRunAt: 0,
+        lastSignalAt: 0,
+        lastSignal: null,
+        lastRejectCode: null,
+        lastError: null,
+      };
+    this.directBots.set(symbol, { ...base, ...patch });
+  }
+
+  updateDirectBotFromSignal(symbol, timeframe, signal, candleTime) {
+    const now = Date.now();
+    const isActionable = signal && signal.side && signal.side !== 'NO_TRADE';
+    this.setDirectBotState(symbol, {
+      timeframe,
+      state: isActionable ? 'SIGNAL' : 'NO_TRADE',
+      inFlight: false,
+      analysisCount: (this.directBots.get(symbol)?.analysisCount || 0) + 1,
+      signalCount: (this.directBots.get(symbol)?.signalCount || 0) + (isActionable ? 1 : 0),
+      rejectCount:
+        (this.directBots.get(symbol)?.rejectCount || 0) + (isActionable ? 0 : 1),
+      lastRunAt: now,
+      lastSignalAt: now,
+      lastSignal: signal
+        ? {
+            side: signal.side,
+            confidence: signal.confidence,
+            timeframe,
+            candleTime,
+            entryPrice: signal.entryPrice,
+            stopLoss: signal.stopLoss,
+            tp1: signal.tp1,
+            tp2: signal.tp2,
+            tp3: signal.tp3,
+            rejectCode: signal.rejectCode || null,
+          }
+        : null,
+      lastRejectCode: signal?.rejectCode || null,
+      lastError: null,
+    });
+  }
+
   getScannerTimeframes() {
     return ['1m', '3m', '5m', '15m'];
   }
@@ -913,6 +987,11 @@ class BotEngine {
       const candleLimit = Math.max(220, Number(this.config.binance.scannerCandleLimit || 260));
       await Promise.allSettled(
         symbols.map(async (symbol) => {
+          this.setDirectBotState(symbol, {
+            inFlight: true,
+            state: 'ANALYZING',
+            lastRunAt: Date.now(),
+          });
           const datasets = await Promise.allSettled([
             this.fetchKlines(symbol, '1m', candleLimit),
             this.fetchKlines(symbol, '3m', candleLimit),
@@ -920,7 +999,19 @@ class BotEngine {
             this.fetchKlines(symbol, '15m', candleLimit),
           ]);
 
-          if (datasets.some((d) => d.status !== 'fulfilled')) return;
+          if (datasets.some((d) => d.status !== 'fulfilled')) {
+            const failed = datasets
+              .map((d, idx) => ({ d, tf: ['1m', '3m', '5m', '15m'][idx] }))
+              .filter((x) => x.d.status !== 'fulfilled')
+              .map((x) => `${x.tf}:${x.d.reason?.message || 'ERR'}`)
+              .join(' | ');
+            this.setDirectBotState(symbol, {
+              inFlight: false,
+              state: 'ERROR',
+              lastError: failed || 'SCAN_DATASET_FAILED',
+            });
+            return;
+          }
 
           const byTf = {
             '1m': datasets[0].value,
@@ -953,9 +1044,16 @@ class BotEngine {
             });
 
             this.stateStore.setMarket(symbol, signal.market || {});
+            this.updateDirectBotFromSignal(symbol, tf, signal, lastClosed.time);
             await this.notifyPreSignal(signal, tf, lastClosed.time);
             await this.dispatchActionableScanSignal(signal, tf, lastClosed.time);
           }
+
+          this.setDirectBotState(symbol, {
+            inFlight: false,
+            state: 'IDLE',
+            lastError: null,
+          });
         }),
       );
     } finally {
@@ -1694,6 +1792,8 @@ class BotEngine {
 
   getStatus() {
     const scannerSymbols = this.getScannerSymbols();
+    const directBotList = scannerSymbols.map((symbol) => this.directBots.get(symbol)).filter(Boolean);
+    const activeDirectBots = directBotList.filter((b) => b.state !== 'ERROR').length;
     return {
       ...this.stateStore.getStatus(),
       priceSource: this.config.trading.priceSource,
@@ -1707,6 +1807,24 @@ class BotEngine {
         symbols: scannerSymbols,
         symbolCount: scannerSymbols.length,
         totalBrainEnabled: true,
+      },
+      fleet: {
+        centralBot: {
+          name: this.config.app.name,
+          role: 'TOTAL_BRAIN',
+        },
+        directBots: {
+          requestedCount: scannerSymbols.length,
+          runningCount: activeDirectBots,
+          bots: directBotList,
+        },
+        telegramBots: {
+          primaryEnabled: this.config.telegram.enabled,
+          secondaryEnabled: this.config.telegram.secondaryEnabled,
+          count:
+            (this.config.telegram.enabled ? 1 : 0) +
+            (this.config.telegram.secondaryEnabled ? 1 : 0),
+        },
       },
       leveragePolicy: {
         dynamicEnabled: this.config.trading.dynamicLeverageEnabled,

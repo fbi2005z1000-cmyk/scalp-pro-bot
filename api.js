@@ -77,6 +77,17 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     res.json({ ok: true, data: botEngine.getStatus() });
   });
 
+  router.get('/fleet', (req, res) => {
+    const status = botEngine.getStatus();
+    res.json({
+      ok: true,
+      data: {
+        scanner: status.scanner || {},
+        fleet: status.fleet || {},
+      },
+    });
+  });
+
   router.get('/logs', (req, res) => {
     const limit = Number(req.query.limit) || 200;
     res.json({ ok: true, data: logger.getLogs(limit) });
