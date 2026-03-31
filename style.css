@@ -109,6 +109,21 @@ body {
   animation: brandTitleWave 2.8s linear infinite;
 }
 
+.brand-version {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: #d6ecff;
+  border: 1px solid rgba(129, 190, 241, 0.55);
+  background: linear-gradient(120deg, rgba(20, 55, 82, 0.92), rgba(27, 105, 164, 0.44));
+  box-shadow: 0 0 12px rgba(90, 166, 227, 0.26);
+}
+
 .brand-subtitle {
   margin: 0;
   font-size: 0.9rem;
@@ -190,6 +205,16 @@ button {
   background: #111b26;
   color: var(--text);
   padding: 8px 10px;
+}
+
+textarea {
+  border-radius: 9px;
+  border: 1px solid rgba(140, 170, 201, 0.35);
+  background: #111b26;
+  color: var(--text);
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 56px;
 }
 
 button {
@@ -744,6 +769,26 @@ button:hover {
   background: rgba(130, 146, 166, 0.13);
 }
 
+.btn.telegram {
+  background: rgba(78, 165, 217, 0.18);
+  border-color: rgba(78, 165, 217, 0.56);
+}
+
+.telegram-test-box {
+  margin-top: 10px;
+  border: 1px solid rgba(128, 151, 179, 0.24);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(9, 16, 24, 0.46);
+}
+
+.telegram-test-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .glossary-list {
   max-height: 280px;
   overflow: auto;
@@ -836,6 +881,10 @@ button:hover {
   }
 
   .btn-row {
+    grid-template-columns: 1fr;
+  }
+
+  .telegram-test-grid {
     grid-template-columns: 1fr;
   }
 

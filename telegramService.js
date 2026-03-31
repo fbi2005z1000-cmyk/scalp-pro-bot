@@ -67,6 +67,13 @@ class TelegramService {
   getTargetRoutes(options = {}) {
     if (!this.routes.length) return [];
 
+    const forcedRoute = String(options.forceRoute || '').toUpperCase();
+    if (forcedRoute) {
+      const forced = this.routes.filter((r) => r.id === forcedRoute);
+      if (forced.length) return forced;
+      return [];
+    }
+
     if (options.broadcast) return this.routes;
 
     const symbol = String(options.symbol || '').toUpperCase();
@@ -283,6 +290,173 @@ class TelegramService {
       }
       this.metrics.failed += 1;
       this.logger.error('telegram', 'Gửi Telegram ảnh lỗi toàn bộ chat', { imagePath, idempotencyKey });
+      return false;
+    });
+  }
+
+  async sendSticker(sticker, options = {}) {
+    if (!this.isEnabled()) return false;
+    const routes = this.getTargetRoutes(options);
+    if (!routes.length) return false;
+    const stickerValue = String(sticker || '').trim();
+    if (!stickerValue) return false;
+
+    return this.enqueue(async () => {
+      await this.cooldown(options.cooldownMs);
+      const idempotencyKey = options.idempotencyKey || null;
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const route of routes) {
+        const routeIdem = idempotencyKey ? `${idempotencyKey}:${route.id}` : null;
+        if (this.shouldDropByIdempotency(routeIdem, options.idempotencyTtlMs || 25000)) continue;
+
+        for (const chatId of route.chatIds) {
+          try {
+            await this.postWithRetry(route, 'sendSticker', {
+              chat_id: chatId,
+              sticker: stickerValue,
+            });
+            successCount += 1;
+          } catch (error) {
+            failCount += 1;
+            this.logger.error('telegram', 'Gửi Telegram sticker lỗi theo chat', {
+              route: route.name,
+              chatId,
+              error: error.message,
+            });
+          }
+        }
+      }
+
+      if (successCount > 0) {
+        this.lastSentAt = Date.now();
+        this.metrics.sent += 1;
+        if (failCount > 0) {
+          this.logger.warn('telegram', 'Một số chat Telegram lỗi khi gửi sticker', {
+            idempotencyKey,
+            successCount,
+            failCount,
+          });
+        } else {
+          this.logger.telegram('Đã gửi Telegram sticker', { idempotencyKey });
+        }
+        return true;
+      }
+      this.metrics.failed += 1;
+      this.logger.error('telegram', 'Gửi Telegram sticker lỗi toàn bộ chat', { idempotencyKey });
+      return false;
+    });
+  }
+
+  async sendAnimation(animation, caption = '', options = {}) {
+    if (!this.isEnabled()) return false;
+    const routes = this.getTargetRoutes(options);
+    if (!routes.length) return false;
+    const animationValue = String(animation || '').trim();
+    if (!animationValue) return false;
+
+    return this.enqueue(async () => {
+      await this.cooldown(options.cooldownMs);
+      const idempotencyKey = options.idempotencyKey || null;
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const route of routes) {
+        const routeIdem = idempotencyKey ? `${idempotencyKey}:${route.id}` : null;
+        if (this.shouldDropByIdempotency(routeIdem, options.idempotencyTtlMs || 25000)) continue;
+
+        for (const chatId of route.chatIds) {
+          try {
+            await this.postWithRetry(route, 'sendAnimation', {
+              chat_id: chatId,
+              animation: animationValue,
+              caption: String(caption || '').slice(0, 1024),
+              parse_mode: this.config.parseMode,
+            });
+            successCount += 1;
+          } catch (error) {
+            failCount += 1;
+            this.logger.error('telegram', 'Gửi Telegram animation lỗi theo chat', {
+              route: route.name,
+              chatId,
+              error: error.message,
+            });
+          }
+        }
+      }
+
+      if (successCount > 0) {
+        this.lastSentAt = Date.now();
+        this.metrics.sent += 1;
+        if (failCount > 0) {
+          this.logger.warn('telegram', 'Một số chat Telegram lỗi khi gửi animation', {
+            idempotencyKey,
+            successCount,
+            failCount,
+          });
+        } else {
+          this.logger.telegram('Đã gửi Telegram animation', { idempotencyKey });
+        }
+        return true;
+      }
+      this.metrics.failed += 1;
+      this.logger.error('telegram', 'Gửi Telegram animation lỗi toàn bộ chat', { idempotencyKey });
+      return false;
+    });
+  }
+
+  async sendDice(emoji = '🎯', options = {}) {
+    if (!this.isEnabled()) return false;
+    const routes = this.getTargetRoutes(options);
+    if (!routes.length) return false;
+    const allowed = new Set(['🎲', '🎯', '🏀', '⚽', '🎳', '🎰']);
+    const diceEmoji = allowed.has(emoji) ? emoji : '🎯';
+
+    return this.enqueue(async () => {
+      await this.cooldown(options.cooldownMs);
+      const idempotencyKey = options.idempotencyKey || null;
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const route of routes) {
+        const routeIdem = idempotencyKey ? `${idempotencyKey}:${route.id}` : null;
+        if (this.shouldDropByIdempotency(routeIdem, options.idempotencyTtlMs || 10000)) continue;
+
+        for (const chatId of route.chatIds) {
+          try {
+            await this.postWithRetry(route, 'sendDice', {
+              chat_id: chatId,
+              emoji: diceEmoji,
+            });
+            successCount += 1;
+          } catch (error) {
+            failCount += 1;
+            this.logger.error('telegram', 'Gửi Telegram dice lỗi theo chat', {
+              route: route.name,
+              chatId,
+              error: error.message,
+            });
+          }
+        }
+      }
+
+      if (successCount > 0) {
+        this.lastSentAt = Date.now();
+        this.metrics.sent += 1;
+        if (failCount > 0) {
+          this.logger.warn('telegram', 'Một số chat Telegram lỗi khi gửi dice', {
+            idempotencyKey,
+            successCount,
+            failCount,
+          });
+        } else {
+          this.logger.telegram('Đã gửi Telegram dice', { idempotencyKey, emoji: diceEmoji });
+        }
+        return true;
+      }
+      this.metrics.failed += 1;
+      this.logger.error('telegram', 'Gửi Telegram dice lỗi toàn bộ chat', { idempotencyKey, emoji: diceEmoji });
       return false;
     });
   }

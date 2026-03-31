@@ -17,6 +17,7 @@
               <span class="face glow"></span>
             </div>
             <h1 class="brand-title">TUẤN ANH BOT</h1>
+            <span class="brand-version">v1.0</span>
           </div>
           <p class="brand-subtitle">BOT DỰ ĐOÁN-AUTO TRADE BY TUẤN ANH</p>
         </div>
@@ -158,6 +159,38 @@
             <button id="confirmTradeBtn" class="btn warning">Xác Nhận Lệnh (Semi)</button>
             <button id="killSwitchBtn" class="btn ghost">Kill Switch</button>
             <button id="applyConfigBtn" class="btn">Cập Nhật Cấu Hình</button>
+          </div>
+          <div class="telegram-test-box">
+            <label>Tin nhắn test Telegram (admin)
+              <textarea id="telegramTestInput" rows="2" placeholder="🔔 Test thông báo từ app..."></textarea>
+            </label>
+            <div class="telegram-test-grid">
+              <label>Route gửi
+                <select id="telegramRouteSelect">
+                  <option value="ALL">ALL (2 bot)</option>
+                  <option value="PRIMARY">PRIMARY</option>
+                  <option value="SECONDARY">SECONDARY</option>
+                </select>
+              </label>
+              <label>Sticker file_id (tuỳ chọn)
+                <input id="telegramStickerInput" type="text" placeholder="CAACAg..." />
+              </label>
+              <label>Animation GIF/MP4 URL (tuỳ chọn)
+                <input id="telegramAnimationInput" type="text" placeholder="https://..." />
+              </label>
+              <label>Dice động (tuỳ chọn)
+                <select id="telegramDiceSelect">
+                  <option value="">Không gửi</option>
+                  <option value="🎯">🎯 Darts</option>
+                  <option value="🎲">🎲 Dice</option>
+                  <option value="🏀">🏀 Basket</option>
+                  <option value="⚽">⚽ Football</option>
+                  <option value="🎳">🎳 Bowling</option>
+                  <option value="🎰">🎰 Slot</option>
+                </select>
+              </label>
+            </div>
+            <button id="sendTelegramTestBtn" class="btn telegram">Gửi Test Telegram</button>
           </div>
         </section>
 

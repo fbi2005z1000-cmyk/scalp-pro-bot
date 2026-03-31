@@ -24,6 +24,79 @@ function validateTradeBody(body) {
   return { ok: true, errors: [] };
 }
 
+function validateTelegramTestBody(body) {
+  if (!isObject(body)) return { ok: false, errors: [toError('Body phai la object JSON')] };
+
+  const errors = [];
+  const allowKeys = [
+    'message',
+    'route',
+    'symbol',
+    'sticker',
+    'animation',
+    'caption',
+    'diceEmoji',
+  ];
+
+  for (const key of Object.keys(body)) {
+    if (!allowKeys.includes(key)) errors.push(toError(`Khong cho phep truong ${key}`, key));
+  }
+
+  if (body.message !== undefined && typeof body.message !== 'string') {
+    errors.push(toError('message phai la string', 'message'));
+  }
+  if (typeof body.message === 'string' && body.message.length > 4000) {
+    errors.push(toError('message khong duoc vuot qua 4000 ky tu', 'message'));
+  }
+
+  if (body.route !== undefined) {
+    const route = String(body.route || '').toUpperCase();
+    if (!['ALL', 'PRIMARY', 'SECONDARY'].includes(route)) {
+      errors.push(toError('route chi nhan ALL | PRIMARY | SECONDARY', 'route'));
+    }
+  }
+
+  if (body.symbol !== undefined && typeof body.symbol !== 'string') {
+    errors.push(toError('symbol phai la string', 'symbol'));
+  }
+  if (body.symbol && String(body.symbol).trim().length < 6) {
+    errors.push(toError('symbol khong hop le', 'symbol'));
+  }
+
+  if (body.sticker !== undefined && typeof body.sticker !== 'string') {
+    errors.push(toError('sticker phai la string', 'sticker'));
+  }
+  if (typeof body.sticker === 'string' && body.sticker.length > 1024) {
+    errors.push(toError('sticker khong duoc vuot qua 1024 ky tu', 'sticker'));
+  }
+
+  if (body.animation !== undefined && typeof body.animation !== 'string') {
+    errors.push(toError('animation phai la string', 'animation'));
+  }
+  if (typeof body.animation === 'string' && body.animation.length > 1024) {
+    errors.push(toError('animation khong duoc vuot qua 1024 ky tu', 'animation'));
+  }
+
+  if (body.caption !== undefined && typeof body.caption !== 'string') {
+    errors.push(toError('caption phai la string', 'caption'));
+  }
+  if (typeof body.caption === 'string' && body.caption.length > 1024) {
+    errors.push(toError('caption khong duoc vuot qua 1024 ky tu', 'caption'));
+  }
+
+  if (body.diceEmoji !== undefined) {
+    const allowedDice = ['🎲', '🎯', '🏀', '⚽', '🎳', '🎰'];
+    if (typeof body.diceEmoji !== 'string' || !allowedDice.includes(body.diceEmoji)) {
+      errors.push(toError('diceEmoji chi nhan 🎲 🎯 🏀 ⚽ 🎳 🎰', 'diceEmoji'));
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+  };
+}
+
 function validateConfigBody(body, runtimeConfig) {
   if (!isObject(body)) return { ok: false, errors: [toError('Body phai la object JSON')] };
 
@@ -309,5 +382,6 @@ function validateConfigBody(body, runtimeConfig) {
 module.exports = {
   validateModeBody,
   validateTradeBody,
+  validateTelegramTestBody,
   validateConfigBody,
 };

@@ -2,6 +2,7 @@
 const {
   validateModeBody,
   validateTradeBody,
+  validateTelegramTestBody,
   validateConfigBody,
 } = require('./requestValidator');
 
@@ -187,6 +188,18 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
       return res.json({ ok: true, data: result });
     } catch (error) {
       return res.status(500).json({ ok: false, error: error.message });
+    }
+  });
+
+  router.post('/telegram/test', async (req, res) => {
+    const invalid = validateOrReject(res, validateTelegramTestBody(req.body));
+    if (invalid) return invalid;
+
+    try {
+      const data = await botEngine.sendTelegramTest(req.body || {});
+      return res.json({ ok: true, data });
+    } catch (error) {
+      return res.status(400).json({ ok: false, error: error.message });
     }
   });
 

@@ -69,6 +69,12 @@
     confirmTradeBtn: document.getElementById('confirmTradeBtn'),
     killSwitchBtn: document.getElementById('killSwitchBtn'),
     applyConfigBtn: document.getElementById('applyConfigBtn'),
+    telegramTestInput: document.getElementById('telegramTestInput'),
+    telegramRouteSelect: document.getElementById('telegramRouteSelect'),
+    telegramStickerInput: document.getElementById('telegramStickerInput'),
+    telegramAnimationInput: document.getElementById('telegramAnimationInput'),
+    telegramDiceSelect: document.getElementById('telegramDiceSelect'),
+    sendTelegramTestBtn: document.getElementById('sendTelegramTestBtn'),
     toggleMA: document.getElementById('toggleMA'),
     toggleRSI: document.getElementById('toggleRSI'),
     toggleVolume: document.getElementById('toggleVolume'),
@@ -1632,6 +1638,30 @@
       };
       await api.post('/config', payload);
       await refreshSignalStatus();
+    });
+
+    el.sendTelegramTestBtn.addEventListener('click', async () => {
+      const oldText = el.sendTelegramTestBtn.textContent;
+      const payload = {
+        message: String(el.telegramTestInput.value || '').trim(),
+        route: el.telegramRouteSelect.value || 'ALL',
+        symbol: state.symbol,
+        sticker: String(el.telegramStickerInput.value || '').trim(),
+        animation: String(el.telegramAnimationInput.value || '').trim(),
+        diceEmoji: el.telegramDiceSelect.value || '',
+      };
+
+      el.sendTelegramTestBtn.disabled = true;
+      el.sendTelegramTestBtn.textContent = 'Đang gửi...';
+      try {
+        await api.post('/telegram/test', payload);
+        alert('Đã gửi test Telegram thành công.');
+      } catch (error) {
+        alert(`Gửi test Telegram thất bại: ${error.message}`);
+      } finally {
+        el.sendTelegramTestBtn.disabled = false;
+        el.sendTelegramTestBtn.textContent = oldText;
+      }
     });
 
     el.toggleMA.addEventListener('change', (e) => {

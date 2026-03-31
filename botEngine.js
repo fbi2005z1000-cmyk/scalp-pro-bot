@@ -1568,6 +1568,78 @@ class BotEngine {
     return this.stateStore.getStatus();
   }
 
+  async sendTelegramTest(payload = {}) {
+    const route = String(payload.route || 'ALL').toUpperCase();
+    const forceRoute = route === 'PRIMARY' || route === 'SECONDARY' ? route : '';
+    const symbol = payload.symbol ? String(payload.symbol).toUpperCase() : '';
+    const options = {
+      symbol,
+      broadcast: route === 'ALL',
+      forceRoute,
+      cooldownMs: 0,
+      idempotencyKey: `manual-test:${Date.now()}:${Math.floor(Math.random() * 100000)}`,
+      idempotencyTtlMs: 1000,
+    };
+
+    const rawMessage = String(payload.message || '').trim();
+    const message =
+      rawMessage ||
+      `🧪 <b>TEST TELEGRAM</b>\nBot: <b>${this.config.app.name}</b>\nRoute: <b>${route}</b>\nTime: <b>${new Date().toLocaleString('vi-VN')}</b>`;
+    const sticker = String(payload.sticker || '').trim();
+    const animation = String(payload.animation || '').trim();
+    const caption = String(payload.caption || '🎬 Animation test từ TUẤN ANH BOT');
+    const diceEmoji = String(payload.diceEmoji || '').trim();
+
+    let sentText = false;
+    let sentSticker = false;
+    let sentAnimation = false;
+    let sentDice = false;
+
+    if (message) {
+      await this.telegramService.sendText(message, options);
+      sentText = true;
+    }
+
+    if (sticker) {
+      sentSticker = await this.telegramService.sendSticker(sticker, {
+        ...options,
+        idempotencyKey: `${options.idempotencyKey}:sticker`,
+      });
+    }
+
+    if (animation) {
+      sentAnimation = await this.telegramService.sendAnimation(animation, caption, {
+        ...options,
+        idempotencyKey: `${options.idempotencyKey}:animation`,
+      });
+    }
+
+    if (diceEmoji) {
+      sentDice = await this.telegramService.sendDice(diceEmoji, {
+        ...options,
+        idempotencyKey: `${options.idempotencyKey}:dice`,
+      });
+    }
+
+    this.logger.info('telegram', 'Admin gửi test Telegram từ app', {
+      route,
+      symbol: symbol || null,
+      sentText,
+      sentSticker,
+      sentAnimation,
+      sentDice,
+    });
+
+    return {
+      route,
+      symbol: symbol || null,
+      sentText,
+      sentSticker,
+      sentAnimation,
+      sentDice,
+    };
+  }
+
   getCurrentSignal() {
     return this.stateStore.state.lastSignal;
   }
