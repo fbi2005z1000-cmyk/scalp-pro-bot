@@ -1,5 +1,3 @@
-﻿const dayjs = require('dayjs');
-
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const safeNumber = (value, fallback = 0) => {
@@ -9,7 +7,54 @@ const safeNumber = (value, fallback = 0) => {
 
 const nowTs = () => Date.now();
 
-const formatTs = (ts) => dayjs(ts).format('YYYY-MM-DD HH:mm:ss');
+const DEFAULT_TIMEZONE = process.env.APP_TIMEZONE || process.env.TZ || 'Asia/Ho_Chi_Minh';
+
+function getDateParts(ts, timezone = DEFAULT_TIMEZONE) {
+  const date = new Date(Number.isFinite(Number(ts)) ? Number(ts) : Date.now());
+  const safeTz = timezone || DEFAULT_TIMEZONE;
+
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: safeTz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+    const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    return {
+      year: map.year,
+      month: map.month,
+      day: map.day,
+      hour: map.hour,
+      minute: map.minute,
+      second: map.second,
+    };
+  } catch (_) {
+    // fallback UTC n?u timezone l?i
+    return {
+      year: String(date.getUTCFullYear()),
+      month: String(date.getUTCMonth() + 1).padStart(2, '0'),
+      day: String(date.getUTCDate()).padStart(2, '0'),
+      hour: String(date.getUTCHours()).padStart(2, '0'),
+      minute: String(date.getUTCMinutes()).padStart(2, '0'),
+      second: String(date.getUTCSeconds()).padStart(2, '0'),
+    };
+  }
+}
+
+const formatTs = (ts, timezone = DEFAULT_TIMEZONE) => {
+  const p = getDateParts(ts, timezone);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+};
+
+const formatDateKey = (ts, timezone = DEFAULT_TIMEZONE) => {
+  const p = getDateParts(ts, timezone);
+  return `${p.year}-${p.month}-${p.day}`;
+};
 
 const percentile = (arr, p) => {
   if (!arr.length) return 0;
@@ -131,6 +176,8 @@ module.exports = {
   safeNumber,
   nowTs,
   formatTs,
+  formatDateKey,
+  DEFAULT_TIMEZONE,
   percentile,
   average,
   stdDev,

@@ -1,6 +1,19 @@
-﻿const fs = require('fs');
+const fs = require('fs');
 const path = require('path');
-const { formatTs, formatDateKey } = require('./utils');
+const utils = require('./utils');
+
+const formatTs =
+  typeof utils.formatTs === 'function'
+    ? utils.formatTs
+    : (ts) => new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+
+const formatDateKey =
+  typeof utils.formatDateKey === 'function'
+    ? utils.formatDateKey
+    : (ts, timezone) => {
+        const text = formatTs(ts, timezone);
+        return String(text).slice(0, 10);
+      };
 
 class Logger {
   constructor(config) {
@@ -81,3 +94,4 @@ class Logger {
 }
 
 module.exports = Logger;
+
