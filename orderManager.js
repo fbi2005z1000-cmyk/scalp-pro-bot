@@ -22,6 +22,23 @@ class OrderManager {
     this.symbolFilters = new Map();
     this.lastLeverageBySymbol = new Map();
     this.feeRateCache = new Map();
+    this.lifecycleHook = null;
+  }
+
+  setLifecycleHook(fn) {
+    this.lifecycleHook = typeof fn === 'function' ? fn : null;
+  }
+
+  emitLifecycle(type, payload = {}) {
+    if (!this.lifecycleHook) return;
+    try {
+      this.lifecycleHook(type, payload);
+    } catch (error) {
+      this.logger.warn('trade', 'Lifecycle hook lỗi', {
+        type,
+        error: error.message,
+      });
+    }
   }
 
   getSignalLeverage(signal) {
@@ -535,6 +552,21 @@ class OrderManager {
       this.lastOrderFingerprint = openCheck.fingerprint;
       this.lastOrderAt = Date.now();
 
+      this.emitLifecycle('ENTRY', {
+        symbol: signalForExecution.symbol,
+        side: signalForExecution.side,
+        timeframe: signalForExecution.signalTimeframe || this.config.timeframe.analysis || '3m',
+        tradeId: position.id,
+        entryPrice: fillPrice,
+        stopLoss: position.stopLoss,
+        tp1: position.tp1,
+        tp2: position.tp2,
+        tp3: position.tp3,
+        leverage: signalForExecution.leverage,
+        confidence: signalForExecution.confidence,
+        mode: this.stateStore.state.mode,
+      });
+
       this.logger.trade('Đã mở vị thế mới', {
         symbol: signalForExecution.symbol,
         side: signalForExecution.side,
@@ -639,6 +671,15 @@ class OrderManager {
     if (!closeQty) {
       this.stateStore.clearActivePosition();
       this.stateStore.setStateMachine(BOT_STATES.CLOSED);
+      this.emitLifecycle('CLOSE', {
+        symbol: position.symbol,
+        side: position.side,
+        timeframe: position.signal?.signalTimeframe || this.config.timeframe.analysis || '3m',
+        tradeId: position.id,
+        reason,
+        pnl: position.realizedPnl || 0,
+        pnlPct: 0,
+      });
       return { ok: true, pnl: position.realizedPnl || 0, pnlPct: 0 };
     }
 
@@ -663,6 +704,22 @@ class OrderManager {
 
     this.stateStore.clearActivePosition();
     this.stateStore.setStateMachine(BOT_STATES.CLOSED);
+
+    const reasonUpper = String(reason || '').toUpperCase();
+    let closeType = 'CLOSE';
+    if (reasonUpper.includes('STOP')) closeType = 'SL';
+    else if (reasonUpper === 'TP1' || reasonUpper === 'TP2' || reasonUpper === 'TP3') closeType = reasonUpper;
+    this.emitLifecycle(closeType, {
+      symbol: position.symbol,
+      side: position.side,
+      timeframe: position.signal?.signalTimeframe || this.config.timeframe.analysis || '3m',
+      tradeId: position.id,
+      reason,
+      closePrice,
+      pnl: totalPnl,
+      pnlPct,
+      fees: totalFees,
+    });
 
     this.riskManager.onTradeClosed({
       symbol: position.symbol,
@@ -794,6 +851,21 @@ class OrderManager {
 
     this.stateStore.updateActivePosition(update);
     this.stateStore.setStateMachine(BOT_STATES.PARTIAL_TP);
+
+    this.emitLifecycle(tpName, {
+      symbol: livePos.symbol,
+      side: livePos.side,
+      timeframe: livePos.signal?.signalTimeframe || this.config.timeframe.analysis || '3m',
+      tradeId: livePos.id,
+      tp: tpName,
+      entryPrice: livePos.entryPrice,
+      closePrice: execPrice,
+      pnl: partPnl,
+      pnlPct: (partPnl / Math.max(livePos.entryPrice * livePos.size, 0.000001)) * 100,
+      closedPct,
+      remainingSize: nextRemaining,
+      stopLoss: update.stopLoss || livePos.stopLoss,
+    });
 
     const remainPct = Math.max(0, 100 - closedPct);
     await this.telegramService.sendTakeProfit({

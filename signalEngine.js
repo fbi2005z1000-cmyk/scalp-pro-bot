@@ -483,6 +483,13 @@ class SignalEngine {
       ind15m,
       spreadPct,
     });
+    const marketRegime = this.detectMarketRegime({
+      trendResult,
+      sidewayResult,
+      ind2m,
+      spreadPct,
+      marketQuality,
+    });
 
     const marketContext = {
       trend: trendResult.trend,
@@ -498,6 +505,7 @@ class SignalEngine {
       atr2m: ind2m.latest.atr14,
       atrPct2m,
       volatilityRegime,
+      marketRegime,
       session: currentSession,
       sessionAllowed,
       ma2m: ind2m.latest,
@@ -595,7 +603,12 @@ class SignalEngine {
     if (trendResult.trend === 'UP') selected = longEval;
     if (trendResult.trend === 'DOWN') selected = shortEval;
 
-    const requiredScore = this.computeRequiredScore(volatilityRegime, sessionAllowed, marketQuality?.score || 0);
+    const requiredScore = this.computeRequiredScore(
+      volatilityRegime,
+      sessionAllowed,
+      marketQuality?.score || 0,
+      marketContext.marketRegime,
+    );
 
     if (selected.hardBlocked) {
       return this.noTrade(
@@ -690,6 +703,7 @@ class SignalEngine {
       trend5m: trendResult.trend,
       trend15m: trend15mResult.trend,
       volatilityRegime,
+      marketRegime: marketContext.marketRegime,
       session: currentSession,
       signalTimeframe: analysisTf,
       entryMin: tradePlan.entryMin,
@@ -774,6 +788,22 @@ class SignalEngine {
     return 'NORMAL_VOL';
   }
 
+  detectMarketRegime({ trendResult, sidewayResult, ind2m, spreadPct, marketQuality }) {
+    if (trendResult?.trend === 'SIDEWAY' || sidewayResult?.sideway) return 'SIDEWAY';
+    const adx = Number(ind2m?.latest?.adx || 0);
+    const bb = Number(ind2m?.latest?.bbBandwidth || 0);
+    const speed = Math.abs(Number(ind2m?.pressure?.priceSpeed || 0));
+    const squeezeMax = Number(this.config.trading.bbSqueezeMax || 0.0045);
+    const noisySpreadLimit = Number(this.config.trading.maxSpreadPct || 0.001) * 0.9;
+    if (adx >= 22 && bb > squeezeMax * 1.1 && spreadPct <= noisySpreadLimit * 0.8) {
+      return 'TREND_STRONG';
+    }
+    if (spreadPct > noisySpreadLimit || bb <= squeezeMax || speed < 0.00008 || Number(marketQuality?.score || 0) < 50) {
+      return 'NOISY';
+    }
+    return 'NORMAL';
+  }
+
   assessMarketQuality({ trendResult, trend15mResult, sidewayResult, ind2m, ind5m, ind15m, spreadPct }) {
     const reasons = [];
     let score = 70;
@@ -830,7 +860,7 @@ class SignalEngine {
     };
   }
 
-  computeRequiredScore(volatilityRegime, sessionAllowed, marketQualityScore = 100) {
+  computeRequiredScore(volatilityRegime, sessionAllowed, marketQualityScore = 100, marketRegime = 'NORMAL') {
     let threshold = this.config.trading.signalThreshold;
 
     if (this.config.advanced.dynamicThresholdByVolatility) {
@@ -847,6 +877,10 @@ class SignalEngine {
     } else if (marketQualityScore >= 75) {
       threshold -= 2;
     }
+
+    if (marketRegime === 'TREND_STRONG') threshold -= 2;
+    if (marketRegime === 'NOISY') threshold += 6;
+    if (marketRegime === 'SIDEWAY') threshold += 30;
 
     return clamp(threshold, 55, 98);
   }

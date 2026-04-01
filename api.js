@@ -93,6 +93,15 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     res.json({ ok: true, data: logger.getLogs(limit) });
   });
 
+  router.get('/lifecycle', (req, res) => {
+    const limit = Number(req.query.limit) || 200;
+    const data =
+      typeof botEngine.getLifecycleEvents === 'function'
+        ? botEngine.getLifecycleEvents(limit)
+        : [];
+    res.json({ ok: true, data });
+  });
+
   router.get('/stats', (req, res) => {
     res.json({ ok: true, data: statsService.getStats() });
   });
@@ -189,6 +198,7 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     unsubscribers.push(botEngine.on('tick', (payload) => send('tick', payload)));
     unsubscribers.push(botEngine.on('signal', (payload) => send('signal', payload)));
     unsubscribers.push(botEngine.on('status', (payload) => send('status', payload)));
+    unsubscribers.push(botEngine.on('lifecycle', (payload) => send('lifecycle', payload)));
     unsubscribers.push(botEngine.on('error', (payload) => send('error', payload)));
 
     const heartbeat = setInterval(() => {

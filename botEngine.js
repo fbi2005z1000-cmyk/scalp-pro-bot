@@ -80,7 +80,21 @@ class BotEngine {
     this.scannerWsLastMessageAt = 0;
     this.scannerWsHealthTimer = null;
     this.scannerWsReconnectTimer = null;
+    this.signalAgeMap = new Map();
+    this.tpProbNotifyMap = new Map();
+    this.lifecycleEvents = [];
+    this.lifecycleMax = 2500;
+    this.lifecycleDedupeMap = new Map();
     this.bound = false;
+
+    if (this.orderManager && typeof this.orderManager.setLifecycleHook === 'function') {
+      this.orderManager.setLifecycleHook((type, payload = {}) => {
+        this.emitLifecycle(type, {
+          source: 'ORDER_MANAGER',
+          ...(payload || {}),
+        });
+      });
+    }
   }
 
   on(eventName, listener) {
@@ -90,6 +104,62 @@ class BotEngine {
 
   emitEvent(eventName, payload) {
     this.events.emit(eventName, payload);
+  }
+
+  buildTradeId({ signal, timeframe, candleTime, triggerPrice }) {
+    const symbol = String(signal?.symbol || '').toUpperCase();
+    const side = String(signal?.side || '').toUpperCase();
+    const tf = String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const price = Number(
+      triggerPrice || signal?.entryPrice || signal?.entryMin || signal?.preSignal?.selected?.triggerPrice || 0,
+    );
+    const band = Number.isFinite(price) && price > 0
+      ? Math.round(price / Math.max(price * 0.0005, 0.5))
+      : 0;
+    const ts = Number(candleTime || signal?.createdAt || Date.now());
+    return `${symbol}:${tf}:${side}:${band}:${Math.floor(ts / 60)}`;
+  }
+
+  emitLifecycle(type, payload = {}, options = {}) {
+    const eventType = String(type || '').toUpperCase();
+    if (!eventType) return null;
+    const now = Date.now();
+    const dedupeMs = Math.max(300, Number(options.dedupeMs || 1200));
+    const tradeId = String(payload.tradeId || this.buildTradeId({ signal: payload, timeframe: payload.timeframe, candleTime: payload.candleTime }) || '');
+    const dedupeKey = `${eventType}:${tradeId}:${payload.symbol || ''}:${payload.timeframe || ''}`;
+    const lastAt = Number(this.lifecycleDedupeMap.get(dedupeKey) || 0);
+    if (lastAt && now - lastAt < dedupeMs) return null;
+    this.lifecycleDedupeMap.set(dedupeKey, now);
+
+    const event = {
+      ts: now,
+      type: eventType,
+      tradeId: tradeId || null,
+      symbol: payload.symbol || null,
+      side: payload.side || null,
+      timeframe: payload.timeframe || null,
+      source: payload.source || 'BOT_ENGINE',
+      data: payload,
+    };
+
+    this.lifecycleEvents.push(event);
+    if (this.lifecycleEvents.length > this.lifecycleMax) {
+      this.lifecycleEvents.splice(0, this.lifecycleEvents.length - this.lifecycleMax);
+    }
+    if (this.lifecycleDedupeMap.size > 6000) {
+      const threshold = now - 30 * 60 * 1000;
+      for (const [k, ts] of this.lifecycleDedupeMap.entries()) {
+        if (ts < threshold) this.lifecycleDedupeMap.delete(k);
+      }
+    }
+
+    this.emitEvent('lifecycle', event);
+    return event;
+  }
+
+  getLifecycleEvents(limit = 200) {
+    const cap = Math.max(1, Math.min(5000, Number(limit || 200)));
+    return this.lifecycleEvents.slice(-cap);
   }
 
   getHttpStatus(error) {
@@ -461,6 +531,10 @@ class BotEngine {
           low: Number(k[3]),
           close: Number(k[4]),
           volume: Number(k[5]),
+          quoteVolume: Number(k[7] || 0),
+          tradeCount: Number(k[8] || 0),
+          takerBuyBaseVolume: Number(k[9] || 0),
+          takerBuyQuoteVolume: Number(k[10] || 0),
           closeTime: Number(k[6]),
           isClosed: Number(k[6]) <= now,
         }));
@@ -1068,6 +1142,33 @@ class BotEngine {
       pack2: signal.preSignal?.packs?.pack2 || null,
     });
 
+    this.emitLifecycle(
+      'PREPARE',
+      {
+        symbol: signal.symbol,
+        side: pre.side,
+        timeframe: tf,
+        candleTime,
+        source: 'DIRECT_BOT_PRE_SIGNAL',
+        tradeId: this.buildTradeId({
+          signal,
+          timeframe: tf,
+          candleTime,
+          triggerPrice: pre.triggerPrice,
+        }),
+        probability: pre.probability,
+        mode: pre.mode,
+        triggerPrice: pre.triggerPrice,
+        remainingCandles,
+        countdownStep: step,
+        stopLoss: preWithFee.stopLoss,
+        tp1: preWithFee.tp1,
+        tp2: preWithFee.tp2,
+        tp3: preWithFee.tp3,
+      },
+      { dedupeMs: Math.max(1000, Number(this.config.trading.preSignalEmitIntervalMs || 3500)) },
+    );
+
     this.preSignalCountdownMap.set(campaignKey, {
       symbol: signal.symbol,
       timeframe: tf,
@@ -1471,6 +1572,10 @@ class BotEngine {
       low: Number(k.l),
       close: Number(k.c),
       volume: Number(k.v),
+      quoteVolume: Number(k.q || 0),
+      tradeCount: Number(k.n || 0),
+      takerBuyBaseVolume: Number(k.V || 0),
+      takerBuyQuoteVolume: Number(k.Q || 0),
       closeTime: Number(k.T),
       isClosed: Boolean(k.x),
       eventTime: Number(body.E || 0),
@@ -1555,6 +1660,269 @@ class BotEngine {
     }
   }
 
+  detectMarketRegime(signal) {
+    const market = signal?.market || {};
+    if (market.sideway || market.trend === 'SIDEWAY') return 'SIDEWAY';
+    const adx = Number(market.adx2m || 0);
+    const spreadPct = Number(market.spreadPct || 0);
+    const bbBandwidth = Number(market.bbBandwidth2m || 0);
+    const pressure = market.pressure || {};
+    const priceSpeed = Math.abs(Number(pressure.priceSpeed || 0));
+    const trendAdxMin = Number(this.config.trading.regimeTrendAdxMin || 22);
+    const noisySpreadMul = Number(this.config.trading.regimeNoisySpreadMul || 0.9);
+    const squeezeMax = Number(this.config.trading.bbSqueezeMax || 0.0045);
+
+    if (
+      adx >= trendAdxMin &&
+      spreadPct <= Number(this.config.trading.maxSpreadPct || 0.001) * 0.7 &&
+      bbBandwidth > squeezeMax * 1.1
+    ) {
+      return 'TREND_STRONG';
+    }
+
+    if (
+      spreadPct >= Number(this.config.trading.maxSpreadPct || 0.001) * noisySpreadMul ||
+      bbBandwidth <= squeezeMax ||
+      priceSpeed < 0.00008
+    ) {
+      return 'NOISY';
+    }
+
+    return 'NORMAL';
+  }
+
+  applySignalQualityDecay(signal, timeframe, candleTime) {
+    if (!signal || signal.side === 'NO_TRADE') return { signal, dropped: false };
+    if (this.config.trading.qualityDecayEnabled === false) return { signal, dropped: false };
+
+    const tf = String(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const tfSec = Math.max(60, this.timeframeToSec(tf));
+    const candleTsSec = Number(candleTime || Math.floor(Date.now() / 1000));
+    const entryBand = signal.entryPrice
+      ? Math.round(signal.entryPrice / Math.max(signal.entryPrice * 0.0005, 0.5))
+      : 0;
+    const setupKey = `${signal.symbol}:${tf}:${signal.side}:${entryBand}`;
+
+    const prev = this.signalAgeMap.get(setupKey) || {
+      firstSeenCandleSec: candleTsSec,
+      lastSeenCandleSec: candleTsSec,
+      hits: 0,
+    };
+    const next = {
+      firstSeenCandleSec: prev.firstSeenCandleSec || candleTsSec,
+      lastSeenCandleSec: candleTsSec,
+      hits: Number(prev.hits || 0) + 1,
+    };
+    this.signalAgeMap.set(setupKey, next);
+
+    if (this.signalAgeMap.size > 8000) {
+      const cutoff = candleTsSec - 6 * 60 * 60;
+      for (const [k, v] of this.signalAgeMap.entries()) {
+        if (Number(v?.lastSeenCandleSec || 0) < cutoff) this.signalAgeMap.delete(k);
+      }
+    }
+
+    const ageCandles = Math.max(
+      0,
+      Math.floor((candleTsSec - Number(next.firstSeenCandleSec || candleTsSec)) / tfSec),
+    );
+    const expireCandles = Math.max(2, Number(this.config.trading.qualityDecayExpireCandles || 6));
+    if (ageCandles >= expireCandles) {
+      return { signal: null, dropped: true, reason: `QUALITY_DECAY_EXPIRED_${ageCandles}` };
+    }
+
+    const perCandle = Math.max(0, Number(this.config.trading.qualityDecayPerCandle || 1.5));
+    const maxPenalty = Math.max(0, Number(this.config.trading.qualityDecayMaxPenalty || 18));
+    const penalty = Math.min(maxPenalty, ageCandles * perCandle);
+    if (penalty <= 0) return { signal, dropped: false };
+
+    const nextSignal = { ...signal };
+    nextSignal.confidence = Math.max(0, Number(signal.confidence || 0) - penalty);
+    nextSignal.qualityDecay = {
+      enabled: true,
+      ageCandles,
+      penalty,
+      expireCandles,
+    };
+    nextSignal.confidenceBreakdown = {
+      ...(signal.confidenceBreakdown || {}),
+      qualityDecayPenalty: -penalty,
+      finalScore: nextSignal.confidence,
+    };
+    return { signal: nextSignal, dropped: false };
+  }
+
+  simulateExecutionGate(signal) {
+    if (!signal || signal.side === 'NO_TRADE') return { ok: false, reason: 'NO_ACTIONABLE_SIGNAL' };
+    if (this.config.trading.executionSimEnabled === false) return { ok: true, score: 100 };
+
+    const ob = this.stateStore.state.orderBook || {};
+    const spreadPct = Number(ob.spreadPct || signal.market?.spreadPct || 0);
+    const estimatedSlippagePct = Number(this.estimateSlippage(signal) || 0);
+    const entry = Number(signal.entryPrice || 0);
+    const tp1 = Number(signal.tp1 || 0);
+    const lev = Math.max(1, Number(signal.leverage || this.config.binance.leverage || 10));
+    const takerFeePct = Math.max(0, Number(signal.takerFeePct || this.config.trading.takerFeePct || 0.0004));
+    const liquidityScore = Number(signal.market?.pressure?.liquidityScore || 0);
+
+    if (!(entry > 0 && tp1 > 0)) {
+      return { ok: false, reason: 'EXEC_SIM_INVALID_PLAN' };
+    }
+
+    const grossRoiPct = (Math.abs(tp1 - entry) / entry) * lev * 100;
+    const feeRoiPct = takerFeePct * 2 * lev * 100;
+    const frictionPct = (spreadPct + estimatedSlippagePct) * lev * 100;
+    const depthPenalty = Math.max(0, (Number(this.config.trading.executionSimMinLiquidity || 35) - liquidityScore) * 0.05);
+    const passScore = grossRoiPct - feeRoiPct - frictionPct - depthPenalty;
+    const minPassScore = Number(this.config.trading.executionSimMinPassScore || 0.3);
+
+    if (liquidityScore < Number(this.config.trading.executionSimMinLiquidity || 35)) {
+      return {
+        ok: false,
+        reason: 'EXEC_SIM_LOW_LIQUIDITY',
+        score: passScore,
+        details: { spreadPct, estimatedSlippagePct, liquidityScore, grossRoiPct, feeRoiPct, frictionPct },
+      };
+    }
+    if (passScore < minPassScore) {
+      return {
+        ok: false,
+        reason: 'EXEC_SIM_NEGATIVE_EDGE',
+        score: passScore,
+        details: { spreadPct, estimatedSlippagePct, liquidityScore, grossRoiPct, feeRoiPct, frictionPct },
+      };
+    }
+
+    return {
+      ok: true,
+      score: passScore,
+      details: { spreadPct, estimatedSlippagePct, liquidityScore, grossRoiPct, feeRoiPct, frictionPct },
+    };
+  }
+
+  async routeSignalLifecycle(signal, timeframe, candleTime, options = {}) {
+    if (!signal || signal.side === 'NO_TRADE') return { ok: false, reason: 'NO_TRADE' };
+
+    const tf = String(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const tradeId = this.buildTradeId({
+      signal,
+      timeframe: tf,
+      candleTime,
+      triggerPrice: signal.entryPrice,
+    });
+    const basePayload = {
+      ...signal,
+      tradeId,
+      timeframe: tf,
+      candleTime,
+      source: options.source || signal.source || 'DIRECT_BOT',
+    };
+
+    this.emitLifecycle('PREPARE', basePayload, { dedupeMs: 800 });
+
+    const decayResult = this.applySignalQualityDecay(basePayload, tf, candleTime);
+    if (decayResult.dropped || !decayResult.signal) {
+      this.emitLifecycle(
+        'RISK_ALERT',
+        {
+          ...basePayload,
+          reason: decayResult.reason || 'QUALITY_DECAY_DROP',
+          riskTag: 'QUALITY_DECAY',
+        },
+        { dedupeMs: 1200 },
+      );
+      return { ok: false, reason: decayResult.reason || 'QUALITY_DECAY_DROP' };
+    }
+    const signalAfterDecay = decayResult.signal;
+
+    const entryGate = options.entryGate || this.shouldSendEntryConfirm(signalAfterDecay, tf);
+    if (!entryGate.ok) {
+      return { ok: false, reason: entryGate.reason || 'WAIT_ENTRY_CONFIRM' };
+    }
+    this.emitLifecycle(
+      'RECONFIRM_ENTRY',
+      {
+        ...signalAfterDecay,
+        tradeId,
+        timeframe: tf,
+        candleTime,
+        reconfirmReason: entryGate.reason,
+      },
+      { dedupeMs: 800 },
+    );
+
+    const totalGate = options.totalGate || this.runTotalBrainGate(signalAfterDecay, tf);
+    if (!totalGate.ok) {
+      this.emitLifecycle(
+        'RISK_ALERT',
+        {
+          ...signalAfterDecay,
+          tradeId,
+          timeframe: tf,
+          candleTime,
+          reason: totalGate.reason,
+          riskTag: 'TOTAL_BRAIN_REJECT',
+        },
+        { dedupeMs: 1000 },
+      );
+      return { ok: false, reason: totalGate.reason };
+    }
+
+    const execSim = this.simulateExecutionGate(signalAfterDecay);
+    if (!execSim.ok) {
+      this.emitLifecycle(
+        'RISK_ALERT',
+        {
+          ...signalAfterDecay,
+          tradeId,
+          timeframe: tf,
+          candleTime,
+          reason: execSim.reason,
+          executionSim: execSim,
+          riskTag: 'EXECUTION_SIM',
+        },
+        { dedupeMs: 1000 },
+      );
+      return { ok: false, reason: execSim.reason };
+    }
+
+    const payload = {
+      ...signalAfterDecay,
+      tradeId,
+      signalTimeframe: tf,
+      entryConfirm: true,
+      entryConfirmReason: entryGate.reason,
+      regimeLabel: totalGate.regime,
+      totalBrainMinScore: totalGate.minScore,
+      executionSim: execSim,
+      source: options.source || signalAfterDecay.source || 'DIRECT_BOT',
+    };
+
+    this.markPreCampaignConfirmed(payload, tf, candleTime);
+
+    let snapshotPath = null;
+    if (
+      options.allowSnapshot &&
+      payload.level === 'STRONG' &&
+      this.config.chartSnapshot.sendOnStrongSignal
+    ) {
+      snapshotPath = await this.chartSnapshot.capture(payload, 'strong-signal');
+    }
+    await this.telegramService.sendSignal(payload, snapshotPath);
+
+    this.emitLifecycle(
+      'ENTRY',
+      {
+        ...payload,
+        tradeId,
+        event: 'ENTRY_SIGNAL_SENT',
+      },
+      { dedupeMs: 1000 },
+    );
+
+    return { ok: true, tradeId, signal: payload };
+  }
+
   runTotalBrainGate(signal, timeframe) {
     if (!signal || signal.side === 'NO_TRADE') {
       return { ok: false, reason: 'NO_TRADE' };
@@ -1583,22 +1951,25 @@ class BotEngine {
       return { ok: false, reason: `TOTAL_BRAIN_REJECT_${hardCode}` };
     }
 
-    const tfBoost = timeframe === '15m' ? 0 : 2;
-    const minScore = Math.max(55, Number(this.config.trading.signalThreshold || 56) + tfBoost);
-    if (Number(signal.confidence || 0) < minScore) {
-      return { ok: false, reason: `TOTAL_BRAIN_LOW_SCORE_${signal.confidence}` };
+    const regime = this.detectMarketRegime(signal);
+    if (regime === 'SIDEWAY') {
+      return { ok: false, reason: 'TOTAL_BRAIN_REJECT_SIDEWAY_REGIME', regime };
     }
 
-    return { ok: true };
+    const tfBoost = timeframe === '15m' ? 0 : 2;
+    let minScore = Math.max(55, Number(this.config.trading.signalThreshold || 56) + tfBoost);
+    if (regime === 'TREND_STRONG') minScore = Math.max(52, minScore - 2);
+    if (regime === 'NOISY') minScore = Math.min(95, minScore + 6);
+    if (Number(signal.confidence || 0) < minScore) {
+      return { ok: false, reason: `TOTAL_BRAIN_LOW_SCORE_${signal.confidence}`, regime, minScore };
+    }
+
+    return { ok: true, regime, minScore };
   }
 
   async dispatchActionableScanSignal(signal, timeframe, candleTime) {
     if (!signal || signal.side === 'NO_TRADE') return;
     if (signal.confidence < this.config.trading.signalThreshold) return;
-    const entryGate = this.shouldSendEntryConfirm(signal, timeframe);
-    if (!entryGate.ok) return;
-    const totalGate = this.runTotalBrainGate(signal, timeframe);
-    if (!totalGate.ok) return;
     const feeRates = await this.orderManager.getFeeRates(signal.symbol);
     signal.takerFeePct = Number(signal.takerFeePct || feeRates.takerFeePct);
     signal.makerFeePct = Number(signal.makerFeePct || feeRates.makerFeePct);
@@ -1632,13 +2003,9 @@ class BotEngine {
       }
     }
 
-    this.markPreCampaignConfirmed(signal, timeframe, candleTime);
-    await this.telegramService.sendSignal({
-      ...signal,
-      signalTimeframe: timeframe,
-      entryConfirm: true,
-      entryConfirmReason: entryGate.reason,
-      source: 'MULTI_SCANNER',
+    await this.routeSignalLifecycle(signal, timeframe, candleTime, {
+      source: 'DIRECT_BOT',
+      allowSnapshot: false,
     });
   }
 
@@ -1981,8 +2348,60 @@ class BotEngine {
       partialClosedPct: Number(position.partialClosedPct || 0),
     });
 
+    const tpProbKey = `${position.symbol}:${position.id || position.openedAt || position.entryPrice}:${position.side}`;
+    const prevTpProb = this.tpProbNotifyMap.get(tpProbKey);
+    const now = Date.now();
+    const shouldEmitTpProb =
+      !prevTpProb ||
+      Math.abs(Number(prevTpProb.probability || 0) - Number(probability || 0)) >= 3 ||
+      String(prevTpProb.direction || 'FLAT') !== String(direction || 'FLAT') ||
+      now - Number(prevTpProb.at || 0) > 12000;
+    if (shouldEmitTpProb) {
+      this.tpProbNotifyMap.set(tpProbKey, {
+        at: now,
+        probability: Number(probability || 0),
+        direction,
+      });
+      this.emitLifecycle(
+        'TP_PROB_UPDATE',
+        {
+          tradeId: position.id,
+          symbol: position.symbol,
+          side: position.side,
+          timeframe: position.signal?.signalTimeframe || this.config.timeframe.analysis || '3m',
+          probability,
+          direction,
+          currentPrice,
+          entryPrice: position.entryPrice,
+          stopLoss: position.stopLoss,
+          tp1: position.tp1,
+          tp2: position.tp2,
+          tp3: position.tp3,
+          netRoiPct,
+        },
+        { dedupeMs: 2000 },
+      );
+    }
+
     const stopRiskSnapshot = this.calcStopRiskSnapshot(position, currentPrice, probability, direction);
     if (this.shouldSendStopRiskWarning(position, stopRiskSnapshot)) {
+      this.emitLifecycle(
+        'RISK_ALERT',
+        {
+          tradeId: position.id,
+          symbol: position.symbol,
+          side: position.side,
+          timeframe: position.signal?.signalTimeframe || this.config.timeframe.analysis || '3m',
+          currentPrice,
+          entryPrice: position.entryPrice,
+          stopLoss: position.stopLoss,
+          probability,
+          stopRiskPct: stopRiskSnapshot.stopRiskPct,
+          riskUsedPct: stopRiskSnapshot.riskUsedPct,
+          reason: stopRiskSnapshot.reason,
+        },
+        { dedupeMs: 1500 },
+      );
       await this.telegramService.sendStopRiskWarning({
         symbol: position.symbol,
         side: position.side,
@@ -2035,6 +2454,7 @@ class BotEngine {
       this.stopPositionPulse();
       this.positionPulseEndedPositionId = null;
       this.positionStopRiskNotifyMap.clear();
+      this.tpProbNotifyMap.clear();
     }
   }
 
@@ -2078,6 +2498,10 @@ class BotEngine {
           low: candle.low,
           close: candle.close,
           volume: candle.volume,
+          quoteVolume: candle.quoteVolume,
+          tradeCount: candle.tradeCount,
+          takerBuyBaseVolume: candle.takerBuyBaseVolume,
+          takerBuyQuoteVolume: candle.takerBuyQuoteVolume,
           closeTime: candle.closeTime,
           isClosed: candle.isClosed,
           eventTime: candle.eventTime,
@@ -2243,14 +2667,11 @@ class BotEngine {
               reason: entryGate.reason,
             });
           } else {
-            this.markPreCampaignConfirmed(signal, analysisTf, candle.time);
-            signal.entryConfirm = true;
-            signal.entryConfirmReason = entryGate.reason;
-            let snapshotPath = null;
-            if (signal.level === 'STRONG' && this.config.chartSnapshot.sendOnStrongSignal) {
-              snapshotPath = await this.chartSnapshot.capture(signal, 'strong-signal');
-            }
-            await this.telegramService.sendSignal(signal, snapshotPath);
+            await this.routeSignalLifecycle(signal, analysisTf, candle.time, {
+              source: 'TOTAL_BRAIN',
+              entryGate,
+              allowSnapshot: true,
+            });
           }
         }
 
@@ -2344,6 +2765,22 @@ class BotEngine {
 
     if (mode === 'AUTO_BOT') {
       if (signal.confidence < this.config.trading.autoThreshold) return;
+
+      const execSim = this.simulateExecutionGate(signal);
+      if (!execSim.ok) {
+        this.emitLifecycle(
+          'RISK_ALERT',
+          {
+            ...signal,
+            timeframe: signal.signalTimeframe || this.config.timeframe.analysis || '3m',
+            reason: execSim.reason,
+            executionSim: execSim,
+            source: 'AUTO_PRE_ORDER',
+          },
+          { dedupeMs: 1200 },
+        );
+        return;
+      }
 
       const orderResult = await this.orderManager.placeMarketOrder(signal, {
         latencyMs,
@@ -2738,6 +3175,10 @@ class BotEngine {
         wsBaseUrl: this.config.binance.wsBaseUrl,
       },
       telegram: this.telegramService.getMetrics ? this.telegramService.getMetrics() : undefined,
+      lifecycle: {
+        count: this.lifecycleEvents.length,
+        last: this.lifecycleEvents.length ? this.lifecycleEvents[this.lifecycleEvents.length - 1] : null,
+      },
     };
   }
 }
