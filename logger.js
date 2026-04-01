@@ -1,11 +1,12 @@
 ﻿const fs = require('fs');
 const path = require('path');
-const { formatTs } = require('./utils');
+const { formatTs, formatDateKey } = require('./utils');
 
 class Logger {
   constructor(config) {
     this.maxMemoryLogs = config.log.maxMemoryLogs;
     this.saveToFile = config.log.saveToFile;
+    this.timezone = config.app?.timezone || process.env.APP_TIMEZONE || process.env.TZ || 'Asia/Ho_Chi_Minh';
     this.logs = [];
     this.logDir = path.resolve(process.cwd(), 'logs');
 
@@ -17,7 +18,7 @@ class Logger {
   push(level, type, message, context = {}) {
     const item = {
       timestamp: Date.now(),
-      time: formatTs(Date.now()),
+      time: formatTs(Date.now(), this.timezone),
       level,
       type,
       message,
@@ -30,7 +31,7 @@ class Logger {
     }
 
     if (this.saveToFile) {
-      const fileName = `${new Date().toISOString().slice(0, 10)}.log`;
+      const fileName = `${formatDateKey(item.timestamp, this.timezone)}.log`;
       const filePath = path.join(this.logDir, fileName);
       fs.appendFile(filePath, `${JSON.stringify(item)}\n`, () => {});
     }

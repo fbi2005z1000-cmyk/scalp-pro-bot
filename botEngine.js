@@ -3,6 +3,7 @@ const EventEmitter = require('events');
 const WebSocket = require('ws');
 const SignalEngine = require('./signalEngine');
 const { BOT_STATES } = require('./stateStore');
+const { formatTs } = require('./utils');
 
 class BotEngine {
   constructor({
@@ -2600,7 +2601,10 @@ class BotEngine {
     const rawMessage = String(payload.message || '').trim();
     const message =
       rawMessage ||
-      `🧪 <b>TEST TELEGRAM</b>\nBot: <b>${this.config.app.name}</b>\nRoute: <b>${route}</b>\nTime: <b>${new Date().toLocaleString('vi-VN')}</b>`;
+      `🧪 <b>TEST TELEGRAM</b>\nBot: <b>${this.config.app.name}</b>\nRoute: <b>${route}</b>\nTime: <b>${formatTs(
+        Date.now(),
+        this.config.app.timezone,
+      )}</b>`;
     const sticker = String(payload.sticker || '').trim();
     const animation = String(payload.animation || '').trim();
     const caption = String(payload.caption || '🎬 Animation test từ TUẤN ANH BOT');

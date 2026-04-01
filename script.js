@@ -36,7 +36,7 @@
     lastTickTs: 0,
     lastClosedSyncKey: '',
     pendingChartRefresh: false,
-    timezoneMode: 'UTC',
+    timezoneMode: localStorage.getItem('APP_TIMEZONE_MODE') || 'VN',
     priceSource: 'LAST',
     livePrice: 0,
     directKlineWs: null,
@@ -222,19 +222,25 @@
     return new Date();
   }
 
+  const TZ = {
+    VN: 'Asia/Ho_Chi_Minh',
+    UTC: 'UTC',
+  };
+
   function formatByTimezone(date, withDate = false) {
     if (!(date instanceof Date)) return '';
-    if (state.timezoneMode === 'UTC') {
+    if (state.timezoneMode === 'UTC' || state.timezoneMode === 'VN') {
+      const zone = state.timezoneMode === 'VN' ? TZ.VN : TZ.UTC;
       return withDate
         ? new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'UTC',
+            timeZone: zone,
             day: '2-digit',
             month: '2-digit',
             hour: '2-digit',
             minute: '2-digit',
           }).format(date)
         : new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'UTC',
+            timeZone: zone,
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
@@ -1535,7 +1541,7 @@
     }
 
     const cooldownText = status.cooldownActive
-      ? `Cooldown đến ${new Date(status.cooldownUntil).toLocaleTimeString()}`
+      ? `Cooldown đến ${formatByTimezone(new Date(status.cooldownUntil), false)}`
       : 'Không cooldown';
 
     const pos = status.activePosition
@@ -1546,7 +1552,7 @@
     const priceText = refPrice ? `Giá(${state.priceSource}): ${formatPrice(refPrice)}` : `Giá(${state.priceSource}): N/A`;
     const i = getLatestIndicatorSnapshot();
     const indicatorText = `RSI14: ${formatNum(i.rsi, 2)} | MA7: ${formatNum(i.ma7, 2)} | MA25: ${formatNum(i.ma25, 2)} | MA99: ${formatNum(i.ma99, 2)} | MA200: ${formatNum(i.ma200, 2)}`;
-    const tzText = `TZ: ${state.timezoneMode}`;
+    const tzText = `TZ: ${state.timezoneMode === 'VN' ? 'UTC+7' : state.timezoneMode}`;
     const marketSource = status.binance?.useTestnet ? 'FUTURES TESTNET' : 'FUTURES MAINNET';
 
     const riskLocked = status.stateMachine === 'PAUSED_BY_RISK' || status.risk?.lockedByRisk;
@@ -1685,7 +1691,10 @@
       .slice(0, 120)
       .map((log) => {
         const cls = log.level || 'info';
-        return `<div class="log-line ${cls}"><span class="t">[${log.time}]</span> <strong>${log.type}</strong> ${log.message}</div>`;
+        const logTime = Number.isFinite(Number(log.timestamp))
+          ? formatByTimezone(new Date(Number(log.timestamp)), false)
+          : log.time;
+        return `<div class="log-line ${cls}"><span class="t">[${logTime}]</span> <strong>${log.type}</strong> ${log.message}</div>`;
       })
       .join('');
 
@@ -2212,6 +2221,7 @@
 
     el.timezoneSelect.addEventListener('change', (e) => {
       state.timezoneMode = e.target.value;
+      localStorage.setItem('APP_TIMEZONE_MODE', state.timezoneMode);
       applyTimezoneToChart();
       renderChart();
       if (state.status) renderStatus(state.status);
@@ -2337,6 +2347,11 @@
     if (el.timeframeSelect && qpTimeframe) el.timeframeSelect.value = qpTimeframe;
 
     await bindActions();
+    if (el.timezoneSelect) {
+      const allowed = new Set(['VN', 'LOCAL', 'UTC']);
+      if (!allowed.has(state.timezoneMode)) state.timezoneMode = 'VN';
+      el.timezoneSelect.value = state.timezoneMode;
+    }
     applyTimezoneToChart();
     await fetchGlossary();
     try {
