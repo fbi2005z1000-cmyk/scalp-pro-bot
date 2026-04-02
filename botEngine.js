@@ -91,6 +91,7 @@ class BotEngine {
     this.globalSignalFlushCount = 0;
     this.globalSignalLastDispatchAt = 0;
     this.globalSignalLastDispatched = null;
+    this.signalBroadcastMemory = new Map();
     this.bound = false;
 
     if (this.orderManager && typeof this.orderManager.setLifecycleHook === 'function') {
@@ -717,6 +718,140 @@ class BotEngine {
     this.zoneSignalHistory.set(zoneKey, history);
   }
 
+  pruneSignalBroadcastMemory() {
+    if (!this.signalBroadcastMemory || !this.signalBroadcastMemory.size) return;
+    const now = Date.now();
+    const keepMs = 2 * 60 * 60 * 1000;
+    for (const [key, value] of this.signalBroadcastMemory.entries()) {
+      const ts = Number(value?.sentAt || 0);
+      if (!ts || now - ts > keepMs) this.signalBroadcastMemory.delete(key);
+    }
+  }
+
+  buildSignalBroadcastKey(signal, timeframe) {
+    const symbol = String(signal?.symbol || '').toUpperCase();
+    const side = String(signal?.side || '').toUpperCase();
+    const tf = String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const entry = Number(signal?.entryPrice || signal?.entryMin || 0);
+    const band = entry > 0 ? Math.round(entry / Math.max(entry * 0.0006, 0.5)) : 0;
+    return `${symbol}:${tf}:${side}:${band}`;
+  }
+
+  buildSignalSnapshot(signal, timeframe, candleTime) {
+    return {
+      symbol: String(signal?.symbol || '').toUpperCase(),
+      side: String(signal?.side || '').toUpperCase(),
+      timeframe: String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m'),
+      candleTime: Number(candleTime || signal?.createdAt || Date.now()),
+      sentAt: Date.now(),
+      entryPrice: Number(signal?.entryPrice || 0),
+      stopLoss: Number(signal?.stopLoss || 0),
+      tp1: Number(signal?.tp1 || 0),
+      tp2: Number(signal?.tp2 || 0),
+      tp3: Number(signal?.tp3 || 0),
+      rr: Number(signal?.rr || 0),
+      confidence: Number(signal?.confidence || 0),
+      level: String(signal?.level || ''),
+      trend5m: String(signal?.trend5m || ''),
+      volatilityRegime: String(signal?.volatilityRegime || ''),
+      globalRank: Number(signal?.globalRanking?.rank || 0),
+    };
+  }
+
+  getSignalVariation(nextSignal, prevSignal) {
+    if (!nextSignal || !prevSignal) return { meaningful: false, changes: [] };
+    const changes = [];
+    const ratio = (a, b) => {
+      if (!Number.isFinite(a) || !Number.isFinite(b) || !b) return 0;
+      return Math.abs((a - b) / b);
+    };
+
+    const nextEntry = Number(nextSignal.entryPrice || 0);
+    const prevEntry = Number(prevSignal.entryPrice || 0);
+    const nextSl = Number(nextSignal.stopLoss || 0);
+    const prevSl = Number(prevSignal.stopLoss || 0);
+    const nextTp1 = Number(nextSignal.tp1 || 0);
+    const prevTp1 = Number(prevSignal.tp1 || 0);
+    const nextConfidence = Number(nextSignal.confidence || 0);
+    const prevConfidence = Number(prevSignal.confidence || 0);
+    const nextRr = Number(nextSignal.rr || 0);
+    const prevRr = Number(prevSignal.rr || 0);
+    const nextRank = Number(nextSignal.globalRanking?.rank || nextSignal.globalRank || 0);
+    const prevRank = Number(prevSignal.globalRanking?.rank || prevSignal.globalRank || 0);
+
+    if (ratio(nextEntry, prevEntry) >= 0.0004) changes.push('Vùng entry thay đổi');
+    if (ratio(nextSl, prevSl) >= 0.0005) changes.push('Mức SL cập nhật');
+    if (ratio(nextTp1, prevTp1) >= 0.0007) changes.push('Mục tiêu TP1 cập nhật');
+    if (Math.abs(nextConfidence - prevConfidence) >= 2) changes.push('Confidence thay đổi');
+    if (Math.abs(nextRr - prevRr) >= 0.08) changes.push('Tỷ lệ RR thay đổi');
+    if (Math.abs(nextRank - prevRank) >= 2.5) changes.push('Xếp hạng kèo thay đổi');
+    if (String(nextSignal.level || '') !== String(prevSignal.level || '')) changes.push('Cấp độ tín hiệu đổi trạng thái');
+    if (String(nextSignal.volatilityRegime || '') !== String(prevSignal.volatilityRegime || '')) {
+      changes.push('Regime thị trường thay đổi');
+    }
+    if (String(nextSignal.trend5m || '') !== String(prevSignal.trend5m || '')) {
+      changes.push('Xu hướng 5m thay đổi');
+    }
+
+    return { meaningful: changes.length > 0, changes };
+  }
+
+  hasMeaningfulSignalVariation(signal, referenceSignal = null) {
+    const prev = referenceSignal || this.lastAcceptedSignal;
+    if (!signal || !prev) return false;
+    if (String(signal.symbol || '').toUpperCase() !== String(prev.symbol || '').toUpperCase()) return false;
+    if (String(signal.side || '').toUpperCase() !== String(prev.side || '').toUpperCase()) return false;
+    return this.getSignalVariation(signal, prev).meaningful;
+  }
+
+  getSignalBroadcastDecision(signal, timeframe, candleTime) {
+    const key = this.buildSignalBroadcastKey(signal, timeframe);
+    const prev = this.signalBroadcastMemory.get(key);
+    if (!prev) return { suppress: false, isUpdate: false, key, changes: [] };
+
+    const now = Date.now();
+    const sinceLastMs = now - Number(prev.sentAt || 0);
+    if (sinceLastMs < 3500) {
+      return {
+        suppress: true,
+        isUpdate: false,
+        key,
+        reason: 'UPDATE_COOLDOWN',
+        changes: [],
+      };
+    }
+
+    const current = this.buildSignalSnapshot(signal, timeframe, candleTime);
+    const variation = this.getSignalVariation(current, prev.snapshot || prev);
+    if (!variation.meaningful) {
+      return {
+        suppress: true,
+        isUpdate: false,
+        key,
+        reason: 'NO_MATERIAL_CHANGE',
+        changes: [],
+      };
+    }
+
+    return {
+      suppress: false,
+      isUpdate: true,
+      key,
+      changes: variation.changes.slice(0, 4),
+    };
+  }
+
+  commitSignalBroadcast(signal, timeframe, candleTime) {
+    const key = this.buildSignalBroadcastKey(signal, timeframe);
+    const snapshot = this.buildSignalSnapshot(signal, timeframe, candleTime);
+    this.signalBroadcastMemory.set(key, {
+      key,
+      sentAt: Date.now(),
+      snapshot,
+    });
+    this.pruneSignalBroadcastMemory();
+  }
+
   getSignalDuplicateDecision(signal) {
     const st = this.stateStore.state;
     const cooldownMs = this.config.trading.signalDuplicateCooldownMs;
@@ -776,6 +911,9 @@ class BotEngine {
         if (lastAccepted && lastAccepted.side === signal.side) {
           const priceDev = Math.abs((lastAccepted.entryPrice - signal.entryPrice) / signal.entryPrice);
           if (priceDev <= maxPriceRangePct) {
+            if (this.hasMeaningfulSignalVariation(signal, lastAccepted)) {
+              return { skip: false, reason: 'MATERIAL_UPDATE_ALLOWED', updateHint: true };
+            }
             return {
               skip: true,
               reason: `Duplicate signal ${signal.side} cùng vùng giá, đang cooldown`,
@@ -795,6 +933,9 @@ class BotEngine {
       const sameTrend = (this.lastAcceptedSignal.trend5m || 'UNKNOWN') === (signal.trend5m || 'UNKNOWN');
 
       if (sameSide && sameRegime && sameTrend && withinCooldown && priceDev <= maxPriceRangePct) {
+        if (this.hasMeaningfulSignalVariation(signal, this.lastAcceptedSignal)) {
+          return { skip: false, reason: 'MATERIAL_UPDATE_ALLOWED', updateHint: true };
+        }
         return {
           skip: true,
           reason: `Duplicate signal guard: cùng hướng/regime/trend, lệch giá ${(priceDev * 100).toFixed(
@@ -1874,24 +2015,6 @@ class BotEngine {
       return { ok: false, reason: totalGate.reason };
     }
 
-    const execSim = this.simulateExecutionGate(signalAfterDecay);
-    if (!execSim.ok) {
-      this.emitLifecycle(
-        'RISK_ALERT',
-        {
-          ...signalAfterDecay,
-          tradeId,
-          timeframe: tf,
-          candleTime,
-          reason: execSim.reason,
-          executionSim: execSim,
-          riskTag: 'EXECUTION_SIM',
-        },
-        { dedupeMs: 1000 },
-      );
-      return { ok: false, reason: execSim.reason };
-    }
-
     const payload = {
       ...signalAfterDecay,
       tradeId,
@@ -1900,9 +2023,13 @@ class BotEngine {
       entryConfirmReason: entryGate.reason,
       regimeLabel: totalGate.regime,
       totalBrainMinScore: totalGate.minScore,
-      executionSim: execSim,
       source: options.source || signalAfterDecay.source || 'DIRECT_BOT',
     };
+
+    const broadcastDecision = this.getSignalBroadcastDecision(payload, tf, candleTime);
+    if (broadcastDecision.suppress) {
+      return { ok: false, reason: broadcastDecision.reason || 'SIGNAL_UPDATE_SUPPRESSED' };
+    }
 
     this.markPreCampaignConfirmed(payload, tf, candleTime);
 
@@ -1914,19 +2041,33 @@ class BotEngine {
     ) {
       snapshotPath = await this.chartSnapshot.capture(payload, 'strong-signal');
     }
-    await this.telegramService.sendSignal(payload, snapshotPath);
+    if (broadcastDecision.isUpdate && typeof this.telegramService.sendSignalUpdate === 'function') {
+      await this.telegramService.sendSignalUpdate(payload, broadcastDecision.changes, snapshotPath);
+      this.emitLifecycle(
+        'ENTRY_UPDATE',
+        {
+          ...payload,
+          tradeId,
+          event: 'ENTRY_SIGNAL_UPDATED',
+          changes: broadcastDecision.changes,
+        },
+        { dedupeMs: 1000 },
+      );
+    } else {
+      await this.telegramService.sendSignal(payload, snapshotPath);
+      this.emitLifecycle(
+        'ENTRY',
+        {
+          ...payload,
+          tradeId,
+          event: 'ENTRY_SIGNAL_SENT',
+        },
+        { dedupeMs: 1000 },
+      );
+    }
 
-    this.emitLifecycle(
-      'ENTRY',
-      {
-        ...payload,
-        tradeId,
-        event: 'ENTRY_SIGNAL_SENT',
-      },
-      { dedupeMs: 1000 },
-    );
-
-    return { ok: true, tradeId, signal: payload };
+    this.commitSignalBroadcast(payload, tf, candleTime);
+    return { ok: true, tradeId, signal: payload, update: Boolean(broadcastDecision.isUpdate) };
   }
 
   runTotalBrainGate(signal, timeframe) {
@@ -2131,15 +2272,16 @@ class BotEngine {
       Number(this.config.trading.globalRankingDispatchCooldownMs || 14000),
     );
 
-    const ranked = Array.from(this.globalSignalQueue.values())
-      .sort((a, b) => Number(b.rank || 0) - Number(a.rank || 0))
-      .slice(0, topN);
+    const ranked = Array.from(this.globalSignalQueue.values()).sort(
+      (a, b) => Number(b.rank || 0) - Number(a.rank || 0),
+    );
     this.globalSignalQueue.clear();
 
     let dispatched = 0;
     let skipped = 0;
-    for (const item of ranked) {
-      if (!item || Number(item.rank || 0) < minRank) {
+    for (let idx = 0; idx < ranked.length; idx += 1) {
+      const item = ranked[idx];
+      if (!item) {
         skipped += 1;
         continue;
       }
@@ -2156,8 +2298,16 @@ class BotEngine {
 
       const payload = {
         ...signal,
-        globalRank: Number(item.rank || 0),
-        globalRankInfo: item.rankInfo,
+        globalRanking: {
+          enabled: true,
+          rank: Number(item.rank || 0),
+          info: item.rankInfo,
+          position: idx + 1,
+          topN,
+          minRank,
+          isTop: idx < topN && Number(item.rank || 0) >= minRank,
+          tier: idx < topN && Number(item.rank || 0) >= minRank ? 'TOP' : 'NORMAL',
+        },
       };
       const routed = await this.routeSignalLifecycle(payload, item.timeframe, item.candleTime, {
         source: 'GLOBAL_RANKING',
@@ -2860,17 +3010,20 @@ class BotEngine {
         preProb,
         Math.floor(signal.createdAt / dedupeBucketMs),
       ].join(':');
-      const duplicated =
+    const duplicated =
         this.lastSignalFingerprint === fingerprint &&
         Date.now() - this.lastSignalAt < this.config.trading.signalDuplicateCooldownMs;
+      const allowDuplicateUpdate = duplicated && this.hasMeaningfulSignalVariation(signal);
 
-      if (!duplicated) {
+      if (!duplicated || allowDuplicateUpdate) {
         this.stateStore.setLastSignal(signal);
         this.lastSignalFingerprint = fingerprint;
         this.lastSignalAt = Date.now();
         if (signal.side !== 'NO_TRADE') {
           this.lastAcceptedSignal = signal;
-          this.registerAcceptedZoneSignal(signal);
+          if (!allowDuplicateUpdate) {
+            this.registerAcceptedZoneSignal(signal);
+          }
         }
 
         this.logger.signal('Tín hiệu mới', {

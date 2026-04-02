@@ -791,6 +791,12 @@ class TelegramService {
         : side === 'SHORT'
         ? { titleIcon: '🔴', trendIcon: '📉', label: 'KÈO SHORT' }
         : { titleIcon: '⚪', trendIcon: '📊', label: 'NO TRADE' };
+    const globalRanking = signalData.globalRanking || {};
+    const isTopSignal = Boolean(globalRanking.isTop);
+    const topBadge = isTopSignal ? '👑✨' : '';
+    const topLine = isTopSignal
+      ? `👑 <b>KÈO TOP #${Number(globalRanking.position || 0)} / ${Number(globalRanking.topN || 0)}</b> | Rank: <b>${Number(globalRanking.rank || 0).toFixed(1)}</b>`
+      : '';
 
     const entryMin = Number(signalData.entryMin || signalData.entryPrice || 0);
     const entryMax = Number(signalData.entryMax || signalData.entryPrice || 0);
@@ -845,7 +851,8 @@ class TelegramService {
     const text = [
       `${botBadge}`,
       `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(signalData.symbol)}</b>`,
-      `✅ <b>ENTRY CONFIRM</b> | ${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
+      `✅ <b>ENTRY CONFIRM ${topBadge}</b> | ${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
+      topLine,
       ``,
       `📍 <b>Vùng vào:</b> ${fmtPrice(entryMin)} - ${fmtPrice(entryMax)}`,
       `🛑 <b>Cắt lỗ:</b> ${fmtPrice(signalData.stopLoss)}`,
@@ -884,6 +891,62 @@ class TelegramService {
     }
 
     await this.sendText(text, { idempotencyKey: `${idem}:text`, symbol: signalData.symbol });
+  }
+
+  async sendSignalUpdate(signalData, changes = [], imagePath = null) {
+    if (!this.config.sendSignal) return;
+    const side = String(signalData.side || '').toUpperCase();
+    const sideIcon = side === 'LONG' ? '🟢' : side === 'SHORT' ? '🔴' : '⚪';
+    const coinIcon = this.getSymbolIcon(signalData.symbol);
+    const botBadge = this.getBotBadge({ symbol: signalData.symbol });
+    const tf = String(signalData.signalTimeframe || signalData.timeframe || '3m');
+    const ranking = signalData.globalRanking || {};
+    const topLine = ranking.isTop
+      ? `👑 TOP #${Number(ranking.position || 0)}/${Number(ranking.topN || 0)} | Rank ${Number(ranking.rank || 0).toFixed(1)}`
+      : '';
+    const changeLines = Array.isArray(changes) && changes.length
+      ? changes.slice(0, 4).map((c) => `- ${esc(String(c))}`)
+      : ['- Cập nhật nhỏ về vùng giá/chất lượng kèo'];
+
+    const fmtPrice = (val) => {
+      const n = Number(val);
+      if (!Number.isFinite(n)) return 'N/A';
+      const abs = Math.abs(n);
+      if (abs < 1) return n.toFixed(4);
+      if (abs < 100) return n.toFixed(3);
+      return n.toFixed(2);
+    };
+
+    const msg = [
+      `${botBadge}`,
+      `🔄 <b>CẬP NHẬT KÈO</b> | ${sideIcon} <b>${esc(side || 'N/A')}</b> | ${coinIcon} <b>${esc(signalData.symbol || 'N/A')}</b> | <b>${esc(tf)}</b>`,
+      topLine,
+      '',
+      '🧩 <b>Điểm thay đổi:</b>',
+      ...changeLines,
+      '',
+      `📍 Entry: <b>${fmtPrice(signalData.entryMin || signalData.entryPrice)} - ${fmtPrice(signalData.entryMax || signalData.entryPrice)}</b>`,
+      `🛑 SL: <b>${fmtPrice(signalData.stopLoss)}</b>`,
+      `🎯 TP1/TP2/TP3: <b>${fmtPrice(signalData.tp1)} / ${fmtPrice(signalData.tp2)} / ${fmtPrice(signalData.tp3)}</b>`,
+      `📊 Confidence: <b>${Number(signalData.confidence || 0)}/100</b>`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const idem = `signal-update:${signalData.symbol}:${side}:${Math.round(Number(signalData.entryPrice || 0) * 100)}:${Math.floor(Date.now() / 4000)}`;
+    if (imagePath && this.config.sendChartImage) {
+      const ok = await this.sendPhoto(imagePath, msg, {
+        idempotencyKey: `${idem}:photo`,
+        idempotencyTtlMs: 8000,
+        symbol: signalData.symbol,
+      });
+      if (ok) return;
+    }
+    await this.sendText(msg, {
+      idempotencyKey: `${idem}:text`,
+      idempotencyTtlMs: 8000,
+      symbol: signalData.symbol,
+    });
   }
 
   async sendTradeOpened(orderData) {
