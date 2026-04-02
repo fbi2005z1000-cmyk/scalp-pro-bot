@@ -854,6 +854,11 @@ class TelegramService {
       `✅ <b>ENTRY CONFIRM ${topBadge}</b> | ${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
       topLine,
       ``,
+      `🕒 <b>Giá tham chiếu (nến đóng):</b> ${fmtPrice(signalData.entryPrice)}`,
+      signalData.livePriceAtSend ? `⚡ <b>Giá realtime lúc gửi:</b> ${fmtPrice(signalData.livePriceAtSend)}` : '',
+      Number.isFinite(Number(signalData.liveDeviationPct))
+        ? `📏 <b>Độ lệch realtime/entry:</b> ${(Number(signalData.liveDeviationPct) * 100).toFixed(3)}%`
+        : '',
       `📍 <b>Vùng vào:</b> ${fmtPrice(entryMin)} - ${fmtPrice(entryMax)}`,
       `🛑 <b>Cắt lỗ:</b> ${fmtPrice(signalData.stopLoss)}`,
       `🎯 <b>TP1:</b> ${fmtPrice(signalData.tp1)}`,
@@ -921,6 +926,12 @@ class TelegramService {
       `${botBadge}`,
       `🔄 <b>CẬP NHẬT KÈO</b> | ${sideIcon} <b>${esc(side || 'N/A')}</b> | ${coinIcon} <b>${esc(signalData.symbol || 'N/A')}</b> | <b>${esc(tf)}</b>`,
       topLine,
+      '',
+      `🕒 Entry tham chiếu: <b>${fmtPrice(signalData.entryPrice)}</b>`,
+      signalData.livePriceAtSend ? `⚡ Giá realtime: <b>${fmtPrice(signalData.livePriceAtSend)}</b>` : '',
+      Number.isFinite(Number(signalData.liveDeviationPct))
+        ? `📏 Độ lệch realtime/entry: <b>${(Number(signalData.liveDeviationPct) * 100).toFixed(3)}%</b>`
+        : '',
       '',
       '🧩 <b>Điểm thay đổi:</b>',
       ...changeLines,

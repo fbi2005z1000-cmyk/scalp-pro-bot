@@ -92,6 +92,7 @@ class BotEngine {
     this.globalSignalLastDispatchAt = 0;
     this.globalSignalLastDispatched = null;
     this.signalBroadcastMemory = new Map();
+    this.priceQuoteCache = new Map();
     this.bound = false;
 
     if (this.orderManager && typeof this.orderManager.setLifecycleHook === 'function') {
@@ -572,6 +573,48 @@ class BotEngine {
     }
 
     throw lastError;
+  }
+
+  async fetchLatestPrice(symbol, options = {}) {
+    const priority = options.priority !== false;
+    const maxAgeMs = Math.max(300, Number(options.maxAgeMs || 1500));
+    const key = String(symbol || '').toUpperCase();
+    if (!key) return null;
+
+    const cached = this.priceQuoteCache.get(key);
+    if (cached && Date.now() - Number(cached.ts || 0) <= maxAgeMs) {
+      return cached;
+    }
+
+    if (Date.now() < this.restGeoBlockedUntil) return cached || null;
+    if (!priority && Date.now() < this.restBlockedUntil) return cached || null;
+    if (!priority && !this.consumeRestBudget()) return cached || null;
+
+    try {
+      const response = await this.rest.get('/fapi/v1/ticker/price', {
+        params: { symbol: key },
+        timeout: 6000,
+      });
+      const p = Number(response?.data?.price || 0);
+      if (!Number.isFinite(p) || p <= 0) return cached || null;
+      const payload = { symbol: key, price: p, ts: Date.now(), source: 'REST_TICKER_PRICE' };
+      this.priceQuoteCache.set(key, payload);
+      if (this.priceQuoteCache.size > 500) {
+        const cutoff = Date.now() - 5 * 60 * 1000;
+        for (const [k, v] of this.priceQuoteCache.entries()) {
+          if (Number(v?.ts || 0) < cutoff) this.priceQuoteCache.delete(k);
+        }
+      }
+      return payload;
+    } catch (error) {
+      if (this.isGeoBlockedError(error)) {
+        const now = Date.now();
+        this.restGeoBlockedUntil = Math.max(this.restGeoBlockedUntil, now + 10 * 60 * 1000);
+      } else if (this.isRateLimitError(error)) {
+        this.blockRestByRateLimit(error);
+      }
+      return cached || null;
+    }
   }
 
   async refreshCandles(symbol, interval, limit = this.config.timeframe.limit, options = {}) {
@@ -2025,6 +2068,33 @@ class BotEngine {
       totalBrainMinScore: totalGate.minScore,
       source: options.source || signalAfterDecay.source || 'DIRECT_BOT',
     };
+
+    const liveQuote = await this.fetchLatestPrice(payload.symbol, { priority: true, maxAgeMs: 1200 });
+    const livePrice =
+      Number(liveQuote?.price || payload.market?.currentPrice || payload.entryPrice || 0) || 0;
+    const entryPrice = Number(payload.entryPrice || 0);
+    const liveDeviationPct =
+      livePrice > 0 && entryPrice > 0 ? Math.abs((livePrice - entryPrice) / entryPrice) : 0;
+    payload.livePriceAtSend = livePrice > 0 ? livePrice : null;
+    payload.livePriceAtSendTs = Number(liveQuote?.ts || Date.now());
+    payload.livePriceSource = liveQuote?.source || 'SIGNAL_CANDLE';
+    payload.entryReference = 'CLOSED_CANDLE';
+    payload.liveDeviationPct = liveDeviationPct;
+    const maxDeviation = Math.max(0.0005, Number(this.config.trading.maxEntryDeviationPct || 0.0018));
+    if (liveDeviationPct > maxDeviation * 1.8) {
+      this.emitLifecycle(
+        'RISK_ALERT',
+        {
+          ...payload,
+          timeframe: tf,
+          candleTime,
+          reason: `ENTRY_MOVED_AWAY_${(liveDeviationPct * 100).toFixed(3)}%`,
+          riskTag: 'ENTRY_DEVIATION',
+        },
+        { dedupeMs: 1200 },
+      );
+      return { ok: false, reason: 'ENTRY_MOVED_AWAY' };
+    }
 
     const broadcastDecision = this.getSignalBroadcastDecision(payload, tf, candleTime);
     if (broadcastDecision.suppress) {
