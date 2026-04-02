@@ -9,6 +9,10 @@ function validateCoreConfig(config) {
   if (!modes.includes(config.mode)) {
     errors.push('BOT_MODE khong hop le');
   }
+  const profiles = ['SAFE', 'BALANCED', 'AGGRESSIVE'];
+  if (!profiles.includes(String(config.profile || '').toUpperCase())) {
+    errors.push('BOT_PROFILE chi nhan SAFE | BALANCED | AGGRESSIVE');
+  }
   const rawTfAllow = ['1m', '3m', '5m', '15m'];
   if (!rawTfAllow.includes(String(config.timeframe.analysis || '').toLowerCase())) {
     errors.push('timeframe.analysis chi duoc dung 1m/3m/5m/15m de lay nen goc Binance');
@@ -109,8 +113,53 @@ function validateCoreConfig(config) {
   if (!inRange(t.entryTimingShortMinRangePos, 0.05, 0.5)) {
     errors.push('trading.entryTimingShortMinRangePos phai trong [0.05,0.5]');
   }
+  if (!inRange(t.regimeTrendAdxMin, 5, 60)) {
+    errors.push('trading.regimeTrendAdxMin phai trong [5,60]');
+  }
+  if (!inRange(t.regimeNoisySpreadMul, 0.5, 2.5)) {
+    errors.push('trading.regimeNoisySpreadMul phai trong [0.5,2.5]');
+  }
   if (!Number.isFinite(t.bbSqueezeMax) || t.bbSqueezeMax < 0) {
     errors.push('trading.bbSqueezeMax phai la so khong am');
+  }
+  if (!Number.isFinite(t.qualityDecayPerCandle) || t.qualityDecayPerCandle < 0) {
+    errors.push('trading.qualityDecayPerCandle phai >= 0');
+  }
+  if (!Number.isFinite(t.qualityDecayMaxPenalty) || t.qualityDecayMaxPenalty < 0) {
+    errors.push('trading.qualityDecayMaxPenalty phai >= 0');
+  }
+  if (!Number.isFinite(t.qualityDecayExpireCandles) || t.qualityDecayExpireCandles < 1) {
+    errors.push('trading.qualityDecayExpireCandles phai >= 1');
+  }
+  if (!Number.isFinite(t.executionSimMinPassScore) || t.executionSimMinPassScore < -50) {
+    errors.push('trading.executionSimMinPassScore phai >= -50');
+  }
+  if (!inRange(t.executionSimMinLiquidity, 0, 100)) {
+    errors.push('trading.executionSimMinLiquidity phai trong [0,100]');
+  }
+  if (!Number.isFinite(t.globalRankingWindowMs) || t.globalRankingWindowMs < 1000) {
+    errors.push('trading.globalRankingWindowMs phai >= 1000');
+  }
+  if (!Number.isFinite(t.globalRankingTopN) || t.globalRankingTopN < 1) {
+    errors.push('trading.globalRankingTopN phai >= 1');
+  }
+  if (!inRange(t.globalRankingMinRank, 0, 100)) {
+    errors.push('trading.globalRankingMinRank phai trong [0,100]');
+  }
+  if (!Number.isFinite(t.globalRankingDispatchCooldownMs) || t.globalRankingDispatchCooldownMs < 1000) {
+    errors.push('trading.globalRankingDispatchCooldownMs phai >= 1000');
+  }
+  if (!Number.isFinite(t.adaptiveSetupLookbackTrades) || t.adaptiveSetupLookbackTrades < 20) {
+    errors.push('trading.adaptiveSetupLookbackTrades phai >= 20');
+  }
+  if (!Number.isFinite(t.adaptiveSetupMinTrades) || t.adaptiveSetupMinTrades < 3) {
+    errors.push('trading.adaptiveSetupMinTrades phai >= 3');
+  }
+  if (!Number.isFinite(t.adaptiveSetupMaxBonus) || t.adaptiveSetupMaxBonus < 0) {
+    errors.push('trading.adaptiveSetupMaxBonus phai >= 0');
+  }
+  if (!Number.isFinite(t.adaptiveSetupMaxPenalty) || t.adaptiveSetupMaxPenalty < 0) {
+    errors.push('trading.adaptiveSetupMaxPenalty phai >= 0');
   }
   if (Number.isFinite(t.overboughtLongRsi) && Number.isFinite(t.oversoldShortRsi) && t.overboughtLongRsi <= t.oversoldShortRsi) {
     errors.push('trading.overboughtLongRsi phai lon hon oversoldShortRsi');
@@ -159,6 +208,18 @@ function validateCoreConfig(config) {
   }
   if (!Number.isFinite(r.maxTradesPerDay) || r.maxTradesPerDay < 1) {
     errors.push('risk.maxTradesPerDay phai >= 1');
+  }
+  if (!Number.isFinite(r.clusterWindowMin) || r.clusterWindowMin < 10) {
+    errors.push('risk.clusterWindowMin phai >= 10');
+  }
+  if (!Number.isFinite(r.clusterMaxSameSideTrades) || r.clusterMaxSameSideTrades < 1) {
+    errors.push('risk.clusterMaxSameSideTrades phai >= 1');
+  }
+  if (!Number.isFinite(r.clusterMaxConsecutiveLosses) || r.clusterMaxConsecutiveLosses < 1) {
+    errors.push('risk.clusterMaxConsecutiveLosses phai >= 1');
+  }
+  if (!Number.isFinite(r.clusterPauseAfterLossMin) || r.clusterPauseAfterLossMin < 0) {
+    errors.push('risk.clusterPauseAfterLossMin phai >= 0');
   }
   if (!['PAUSE', 'KEEP', 'CLOSE'].includes(String(r.syncUnknownPositionAction || '').toUpperCase())) {
     errors.push('risk.syncUnknownPositionAction chi nhan PAUSE | KEEP | CLOSE');

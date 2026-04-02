@@ -147,6 +147,10 @@ function validateConfigBody(body, runtimeConfig) {
       'autoEmergencyDrawdownPct',
       'initialCapital',
       'minNotionalUSDT',
+      'clusterWindowMin',
+      'clusterMaxSameSideTrades',
+      'clusterMaxConsecutiveLosses',
+      'clusterPauseAfterLossMin',
     ];
     for (const key of numericRisk) {
       if (Object.prototype.hasOwnProperty.call(body.risk, key)) {
@@ -168,6 +172,12 @@ function validateConfigBody(body, runtimeConfig) {
       typeof body.risk.keepRunningOnRiskLock !== 'boolean'
     ) {
       errors.push(toError('keepRunningOnRiskLock phai la boolean', 'risk.keepRunningOnRiskLock'));
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body.risk, 'clusterGuardEnabled') &&
+      typeof body.risk.clusterGuardEnabled !== 'boolean'
+    ) {
+      errors.push(toError('clusterGuardEnabled phai la boolean', 'risk.clusterGuardEnabled'));
     }
     if (Object.prototype.hasOwnProperty.call(body.risk, 'syncUnknownPositionAction')) {
       const action = String(body.risk.syncUnknownPositionAction || '').toUpperCase();
@@ -210,6 +220,16 @@ function validateConfigBody(body, runtimeConfig) {
       'preSignalWatchDistancePct',
       'preSignalArmDistancePct',
       'preSignalEmitIntervalMs',
+      'globalRankingWindowMs',
+      'globalRankingTopN',
+      'globalRankingMinRank',
+      'globalRankingDispatchCooldownMs',
+      'adaptiveSetupLookbackTrades',
+      'adaptiveSetupMinTrades',
+      'adaptiveSetupMaxBonus',
+      'adaptiveSetupMaxPenalty',
+      'executionSimMinPassScore',
+      'executionSimMinLiquidity',
       'trailingActivationRR',
       'trailingLockRR',
       'takerFeePct',
@@ -255,6 +275,18 @@ function validateConfigBody(body, runtimeConfig) {
       typeof body.trading.dynamicLeverageEnabled !== 'boolean'
     ) {
       errors.push(toError('dynamicLeverageEnabled phai la boolean', 'trading.dynamicLeverageEnabled'));
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body.trading, 'globalRankingEnabled') &&
+      typeof body.trading.globalRankingEnabled !== 'boolean'
+    ) {
+      errors.push(toError('globalRankingEnabled phai la boolean', 'trading.globalRankingEnabled'));
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body.trading, 'adaptiveSetupWeightEnabled') &&
+      typeof body.trading.adaptiveSetupWeightEnabled !== 'boolean'
+    ) {
+      errors.push(toError('adaptiveSetupWeightEnabled phai la boolean', 'trading.adaptiveSetupWeightEnabled'));
     }
 
     if (Object.prototype.hasOwnProperty.call(body.trading, 'priceSource')) {
@@ -323,6 +355,35 @@ function validateConfigBody(body, runtimeConfig) {
   }
   if (mergedTrading.maxSignalsPerZoneWindow < 1) {
     errors.push(toError('maxSignalsPerZoneWindow phai >= 1', 'trading.maxSignalsPerZoneWindow'));
+  }
+  if (mergedTrading.globalRankingWindowMs < 1000) {
+    errors.push(toError('globalRankingWindowMs phai >= 1000', 'trading.globalRankingWindowMs'));
+  }
+  if (mergedTrading.globalRankingTopN < 1) {
+    errors.push(toError('globalRankingTopN phai >= 1', 'trading.globalRankingTopN'));
+  }
+  if (mergedTrading.globalRankingMinRank < 0 || mergedTrading.globalRankingMinRank > 100) {
+    errors.push(toError('globalRankingMinRank phai trong [0,100]', 'trading.globalRankingMinRank'));
+  }
+  if (mergedTrading.globalRankingDispatchCooldownMs < 1000) {
+    errors.push(
+      toError('globalRankingDispatchCooldownMs phai >= 1000', 'trading.globalRankingDispatchCooldownMs'),
+    );
+  }
+  if (mergedTrading.adaptiveSetupLookbackTrades < 20) {
+    errors.push(toError('adaptiveSetupLookbackTrades phai >= 20', 'trading.adaptiveSetupLookbackTrades'));
+  }
+  if (mergedTrading.adaptiveSetupMinTrades < 3) {
+    errors.push(toError('adaptiveSetupMinTrades phai >= 3', 'trading.adaptiveSetupMinTrades'));
+  }
+  if (mergedTrading.adaptiveSetupMaxBonus < 0) {
+    errors.push(toError('adaptiveSetupMaxBonus phai >= 0', 'trading.adaptiveSetupMaxBonus'));
+  }
+  if (mergedTrading.adaptiveSetupMaxPenalty < 0) {
+    errors.push(toError('adaptiveSetupMaxPenalty phai >= 0', 'trading.adaptiveSetupMaxPenalty'));
+  }
+  if (mergedTrading.executionSimMinLiquidity < 0 || mergedTrading.executionSimMinLiquidity > 100) {
+    errors.push(toError('executionSimMinLiquidity phai trong [0,100]', 'trading.executionSimMinLiquidity'));
   }
   if (mergedTrading.overboughtLongRsi <= mergedTrading.oversoldShortRsi) {
     errors.push(toError('overboughtLongRsi phai lon hon oversoldShortRsi', 'trading.overboughtLongRsi'));
@@ -397,6 +458,18 @@ function validateConfigBody(body, runtimeConfig) {
     errors.push(
       toError('syncUnknownPositionAction chi nhan PAUSE | KEEP | CLOSE', 'risk.syncUnknownPositionAction'),
     );
+  }
+  if (mergedRisk.clusterWindowMin < 10) {
+    errors.push(toError('clusterWindowMin phai >= 10', 'risk.clusterWindowMin'));
+  }
+  if (mergedRisk.clusterMaxSameSideTrades < 1) {
+    errors.push(toError('clusterMaxSameSideTrades phai >= 1', 'risk.clusterMaxSameSideTrades'));
+  }
+  if (mergedRisk.clusterMaxConsecutiveLosses < 1) {
+    errors.push(toError('clusterMaxConsecutiveLosses phai >= 1', 'risk.clusterMaxConsecutiveLosses'));
+  }
+  if (mergedRisk.clusterPauseAfterLossMin < 0) {
+    errors.push(toError('clusterPauseAfterLossMin phai >= 0', 'risk.clusterPauseAfterLossMin'));
   }
 
   return {

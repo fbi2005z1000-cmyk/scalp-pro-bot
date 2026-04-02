@@ -85,6 +85,12 @@ class BotEngine {
     this.lifecycleEvents = [];
     this.lifecycleMax = 2500;
     this.lifecycleDedupeMap = new Map();
+    this.globalSignalQueue = new Map();
+    this.globalSignalDispatchDedupe = new Map();
+    this.globalSignalLastFlushAt = 0;
+    this.globalSignalFlushCount = 0;
+    this.globalSignalLastDispatchAt = 0;
+    this.globalSignalLastDispatched = null;
     this.bound = false;
 
     if (this.orderManager && typeof this.orderManager.setLifecycleHook === 'function') {
@@ -1967,6 +1973,226 @@ class BotEngine {
     return { ok: true, regime, minScore };
   }
 
+  getAdaptiveSetupWeight(signal, timeframe) {
+    if (!this.config.trading.adaptiveSetupWeightEnabled) {
+      return { adjustment: 0, count: 0, setupKey: null };
+    }
+    const historyAll = Array.isArray(this.stateStore.state.risk?.tradeHistory)
+      ? this.stateStore.state.risk.tradeHistory
+      : [];
+    const lookback = Math.max(20, Number(this.config.trading.adaptiveSetupLookbackTrades || 260));
+    const history = historyAll.slice(0, lookback);
+
+    const side = String(signal?.side || '').toUpperCase();
+    const tf = String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const setupType = String(signal?.level || signal?.setupType || 'UNKNOWN').toUpperCase();
+    const regime = String(signal?.volatilityRegime || signal?.market?.volatilityRegime || 'UNKNOWN').toUpperCase();
+    const setupKey = `${setupType}:${tf}:${side}:${regime}`;
+
+    const matched = history.filter((t) => {
+      const tSide = String(t?.side || '').toUpperCase();
+      const tTf = String(t?.timeframe || '').toLowerCase();
+      const tSetup = String(t?.setupType || 'UNKNOWN').toUpperCase();
+      const tRegime = String(t?.regime || 'UNKNOWN').toUpperCase();
+      return tSide === side && tTf === String(tf).toLowerCase() && tSetup === setupType && tRegime === regime;
+    });
+
+    const minTrades = Math.max(3, Number(this.config.trading.adaptiveSetupMinTrades || 10));
+    if (matched.length < minTrades) {
+      return { adjustment: 0, count: matched.length, setupKey };
+    }
+
+    const wins = matched.filter((t) => Number(t?.pnl || 0) > 0);
+    const winRate = (wins.length / matched.length) * 100;
+    const grossWin = wins.reduce((sum, t) => sum + Number(t?.pnl || 0), 0);
+    const grossLossAbs = matched
+      .filter((t) => Number(t?.pnl || 0) < 0)
+      .reduce((sum, t) => sum + Math.abs(Number(t?.pnl || 0)), 0);
+    const profitFactor = grossLossAbs > 0 ? grossWin / grossLossAbs : (grossWin > 0 ? 999 : 0);
+
+    const maxBonus = Math.max(0, Number(this.config.trading.adaptiveSetupMaxBonus || 10));
+    const maxPenalty = Math.max(0, Number(this.config.trading.adaptiveSetupMaxPenalty || 12));
+    const winAdj = (winRate - 50) * 0.18;
+    const pfAdj = (Math.min(profitFactor, 3.5) - 1) * 2.2;
+    const countAdj = Math.min(2.5, matched.length / 20);
+    const rawAdj = winAdj + pfAdj + countAdj;
+    const adjustment = Math.max(-maxPenalty, Math.min(maxBonus, rawAdj));
+
+    return {
+      adjustment,
+      count: matched.length,
+      setupKey,
+      winRate,
+      profitFactor,
+    };
+  }
+
+  computeGlobalSignalRank(signal, timeframe, candleTime) {
+    const confidence = Number(signal?.confidence || 0);
+    const rr = Number(signal?.rr || 0);
+    const marketQuality = Number(signal?.marketQuality?.score || signal?.market?.qualityScore || 50);
+    const pressure = signal?.market?.pressure || {};
+    const buy = Number(pressure.buyPressure || 0);
+    const sell = Number(pressure.sellPressure || 0);
+    const side = String(signal?.side || '').toUpperCase();
+    const pressureEdge = side === 'LONG' ? buy - sell : sell - buy;
+    const regime = this.detectMarketRegime(signal);
+    const regimeAdj = regime === 'TREND_STRONG' ? 4 : regime === 'NOISY' ? -6 : 0;
+    const rrAdj = rr > 0 ? Math.max(-8, Math.min(12, (rr - 1) * 8)) : -6;
+    const qualityAdj = Math.max(-8, Math.min(10, (marketQuality - 50) * 0.2));
+    const pressureAdj = Math.max(-6, Math.min(8, pressureEdge * 0.25));
+    const setupPerf = this.getAdaptiveSetupWeight(signal, timeframe);
+
+    const tf = String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const tfAdj = tf === '15m' ? 3 : tf === '5m' ? 2 : tf === '3m' ? 1 : 0;
+
+    const rank = Math.max(
+      0,
+      Math.min(
+        100,
+        confidence * 0.55 + rrAdj + qualityAdj + pressureAdj + regimeAdj + tfAdj + Number(setupPerf.adjustment || 0),
+      ),
+    );
+
+    return {
+      rank,
+      components: {
+        confidenceCore: confidence * 0.55,
+        rrAdj,
+        qualityAdj,
+        pressureAdj,
+        regimeAdj,
+        timeframeAdj: tfAdj,
+        setupHistoryAdj: Number(setupPerf.adjustment || 0),
+      },
+      setupPerf,
+      regime,
+      candleTime: Number(candleTime || 0),
+    };
+  }
+
+  buildGlobalSignalQueueKey(signal, timeframe, candleTime) {
+    const tf = String(timeframe || signal?.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const entry = Number(signal?.entryPrice || 0);
+    const entryBand = entry > 0 ? Math.round(entry / Math.max(entry * 0.0005, 0.5)) : 0;
+    const bucket = Math.floor(Number(candleTime || Date.now() / 1000) / Math.max(15, this.timeframeToSec(tf)));
+    return `${String(signal?.symbol || '').toUpperCase()}:${tf}:${String(signal?.side || '').toUpperCase()}:${entryBand}:${bucket}`;
+  }
+
+  pruneGlobalSignalMaps() {
+    const now = Date.now();
+    const queueKeepMs = Math.max(10000, Number(this.config.trading.globalRankingWindowMs || 5000) * 6);
+    for (const [key, item] of this.globalSignalQueue.entries()) {
+      if (!item || now - Number(item.createdAt || 0) > queueKeepMs) this.globalSignalQueue.delete(key);
+    }
+    const dispatchKeepMs = Math.max(
+      30000,
+      Number(this.config.trading.globalRankingDispatchCooldownMs || 14000) * 8,
+    );
+    for (const [key, ts] of this.globalSignalDispatchDedupe.entries()) {
+      if (!ts || now - Number(ts) > dispatchKeepMs) this.globalSignalDispatchDedupe.delete(key);
+    }
+  }
+
+  enqueueGlobalSignalCandidate(signal, timeframe, candleTime) {
+    const rankInfo = this.computeGlobalSignalRank(signal, timeframe, candleTime);
+    const key = this.buildGlobalSignalQueueKey(signal, timeframe, candleTime);
+    const existing = this.globalSignalQueue.get(key);
+    const candidate = {
+      key,
+      signal,
+      timeframe,
+      candleTime,
+      rank: Number(rankInfo.rank || 0),
+      rankInfo,
+      createdAt: Date.now(),
+    };
+    if (!existing || candidate.rank >= Number(existing.rank || 0)) {
+      this.globalSignalQueue.set(key, candidate);
+    }
+    this.pruneGlobalSignalMaps();
+    return candidate;
+  }
+
+  async flushGlobalSignalQueue(options = {}) {
+    if (!this.config.trading.globalRankingEnabled) {
+      return { dispatched: 0, considered: 0, skipped: 0, reason: 'DISABLED' };
+    }
+    const now = Date.now();
+    const windowMs = Math.max(1000, Number(this.config.trading.globalRankingWindowMs || 5000));
+    if (!options.force && now - this.globalSignalLastFlushAt < windowMs) {
+      return { dispatched: 0, considered: this.globalSignalQueue.size, skipped: 0, reason: 'WINDOW_WAIT' };
+    }
+
+    const minRank = Math.max(0, Math.min(100, Number(this.config.trading.globalRankingMinRank || 45)));
+    const topN = Math.max(1, Number(this.config.trading.globalRankingTopN || 8));
+    const dispatchCooldown = Math.max(
+      1000,
+      Number(this.config.trading.globalRankingDispatchCooldownMs || 14000),
+    );
+
+    const ranked = Array.from(this.globalSignalQueue.values())
+      .sort((a, b) => Number(b.rank || 0) - Number(a.rank || 0))
+      .slice(0, topN);
+    this.globalSignalQueue.clear();
+
+    let dispatched = 0;
+    let skipped = 0;
+    for (const item of ranked) {
+      if (!item || Number(item.rank || 0) < minRank) {
+        skipped += 1;
+        continue;
+      }
+
+      const signal = item.signal || {};
+      const entry = Number(signal.entryPrice || 0);
+      const entryBand = entry > 0 ? Math.round(entry / Math.max(entry * 0.0005, 0.5)) : 0;
+      const dedupeKey = `${signal.symbol}:${item.timeframe}:${signal.side}:${entryBand}`;
+      const lastAt = Number(this.globalSignalDispatchDedupe.get(dedupeKey) || 0);
+      if (lastAt && now - lastAt < dispatchCooldown) {
+        skipped += 1;
+        continue;
+      }
+
+      const payload = {
+        ...signal,
+        globalRank: Number(item.rank || 0),
+        globalRankInfo: item.rankInfo,
+      };
+      const routed = await this.routeSignalLifecycle(payload, item.timeframe, item.candleTime, {
+        source: 'GLOBAL_RANKING',
+        allowSnapshot: false,
+      });
+      if (!routed?.ok) {
+        skipped += 1;
+        continue;
+      }
+
+      this.lastAcceptedSignal = payload;
+      this.lastSignalAt = Date.now();
+      this.registerAcceptedZoneSignal(payload);
+      this.globalSignalDispatchDedupe.set(dedupeKey, Date.now());
+      this.globalSignalLastDispatched = {
+        symbol: payload.symbol,
+        side: payload.side,
+        timeframe: item.timeframe,
+        rank: Number(item.rank || 0),
+        at: Date.now(),
+      };
+      dispatched += 1;
+    }
+
+    this.globalSignalLastFlushAt = now;
+    this.globalSignalFlushCount += 1;
+    if (dispatched > 0) this.globalSignalLastDispatchAt = now;
+    this.pruneGlobalSignalMaps();
+    return {
+      dispatched,
+      considered: ranked.length,
+      skipped,
+    };
+  }
+
   async dispatchActionableScanSignal(signal, timeframe, candleTime) {
     if (!signal || signal.side === 'NO_TRADE') return;
     if (signal.confidence < this.config.trading.signalThreshold) return;
@@ -2003,10 +2229,21 @@ class BotEngine {
       }
     }
 
-    await this.routeSignalLifecycle(signal, timeframe, candleTime, {
-      source: 'DIRECT_BOT',
-      allowSnapshot: false,
-    });
+    if (!this.config.trading.globalRankingEnabled) {
+      await this.routeSignalLifecycle(signal, timeframe, candleTime, {
+        source: 'DIRECT_BOT',
+        allowSnapshot: false,
+      });
+      return;
+    }
+
+    this.enqueueGlobalSignalCandidate(signal, timeframe, candleTime);
+    const topN = Math.max(1, Number(this.config.trading.globalRankingTopN || 8));
+    const shouldForceFlush =
+      this.globalSignalQueue.size >= topN ||
+      Date.now() - this.globalSignalLastFlushAt >=
+        Math.max(1000, Number(this.config.trading.globalRankingWindowMs || 5000));
+    await this.flushGlobalSignalQueue({ force: shouldForceFlush });
   }
 
   async scanDirectSymbol(symbol, options = {}) {
@@ -2203,6 +2440,13 @@ class BotEngine {
         }),
       );
     } finally {
+      if (this.config.trading.globalRankingEnabled && this.globalSignalQueue.size > 0) {
+        try {
+          await this.flushGlobalSignalQueue({ force: true });
+        } catch (error) {
+          this.logger.warn('bot', 'Lỗi flush global ranking queue', { error: error.message });
+        }
+      }
       this.multiScanInFlight = false;
       this.emitEvent('status', this.getStatus());
     }
@@ -3116,6 +3360,7 @@ class BotEngine {
     const directBotList = health.bots;
     return {
       ...this.stateStore.getStatus(),
+      profile: this.config.profile || 'BALANCED',
       priceSource: this.config.trading.priceSource,
       advanced: this.config.advanced,
       positionSizing: this.config.positionSizing,
@@ -3132,6 +3377,19 @@ class BotEngine {
         symbols: scannerSymbols,
         symbolCount: scannerSymbols.length,
         totalBrainEnabled: true,
+      },
+      ranking: {
+        enabled: this.config.trading.globalRankingEnabled,
+        windowMs: this.config.trading.globalRankingWindowMs,
+        topN: this.config.trading.globalRankingTopN,
+        minRank: this.config.trading.globalRankingMinRank,
+        dispatchCooldownMs: this.config.trading.globalRankingDispatchCooldownMs,
+        queueSize: this.globalSignalQueue.size,
+        flushCount: this.globalSignalFlushCount,
+        lastFlushAt: this.globalSignalLastFlushAt || 0,
+        lastDispatchAt: this.globalSignalLastDispatchAt || 0,
+        lastDispatched: this.globalSignalLastDispatched || null,
+        adaptiveSetupWeightEnabled: this.config.trading.adaptiveSetupWeightEnabled,
       },
       fleet: {
         centralBot: {

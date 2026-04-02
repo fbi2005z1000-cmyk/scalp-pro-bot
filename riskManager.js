@@ -77,6 +77,90 @@ class RiskManager {
     }
   }
 
+  getRiskClusterId(symbol) {
+    const s = String(symbol || '').toUpperCase();
+    const high = new Set(this.config.positionSizing?.highLiqSymbols || []);
+    const scp = new Set(this.config.positionSizing?.scpSymbols || []);
+    if (high.has(s)) return 'HIGH_LIQ';
+    if (scp.has(s)) return 'SCP';
+    return 'OTHER';
+  }
+
+  evaluateClusterRisk(signal) {
+    if (!this.config.risk.clusterGuardEnabled) {
+      return { blocked: false, reasons: [] };
+    }
+    const symbol = String(signal?.symbol || '').toUpperCase();
+    const side = String(signal?.side || '').toUpperCase();
+    if (!symbol || !side || side === 'NO_TRADE') {
+      return { blocked: false, reasons: [] };
+    }
+
+    const cluster = this.getRiskClusterId(symbol);
+    const windowMin = Math.max(10, Number(this.config.risk.clusterWindowMin || 120));
+    const maxSameSideTrades = Math.max(1, Number(this.config.risk.clusterMaxSameSideTrades || 3));
+    const maxConsecutiveLosses = Math.max(
+      1,
+      Number(this.config.risk.clusterMaxConsecutiveLosses || 2),
+    );
+    const pauseAfterLossMin = Math.max(0, Number(this.config.risk.clusterPauseAfterLossMin || 45));
+    const since = Date.now() - windowMin * 60 * 1000;
+    const history = Array.isArray(this.stateStore.state.risk?.tradeHistory)
+      ? this.stateStore.state.risk.tradeHistory
+      : [];
+
+    const clusterTrades = history.filter((t) => {
+      if (Number(t?.timestamp || 0) < since) return false;
+      return this.getRiskClusterId(t?.symbol) === cluster;
+    });
+    const sameSideTrades = clusterTrades.filter((t) => String(t?.side || '').toUpperCase() === side);
+
+    const reasons = [];
+    if (sameSideTrades.length >= maxSameSideTrades) {
+      reasons.push({
+        code: 'RISK_CLUSTER_OVEREXPOSED',
+        reason: `Cluster ${cluster} đã có ${sameSideTrades.length} lệnh ${side}/${windowMin}m`,
+      });
+    }
+
+    const sameSideSorted = sameSideTrades.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+    let consecutiveLosses = 0;
+    for (const t of sameSideSorted) {
+      const pnl = Number(t?.pnl || 0);
+      if (pnl < 0) consecutiveLosses += 1;
+      else break;
+    }
+    if (consecutiveLosses >= maxConsecutiveLosses) {
+      reasons.push({
+        code: 'RISK_CLUSTER_LOSS_STREAK',
+        reason: `Cluster ${cluster} đang có chuỗi thua ${consecutiveLosses} lệnh ${side}`,
+      });
+    }
+
+    const latestLoss = sameSideSorted.find((t) => Number(t?.pnl || 0) < 0);
+    if (latestLoss && pauseAfterLossMin > 0) {
+      const ageMs = Date.now() - Number(latestLoss.timestamp || 0);
+      const pauseMs = pauseAfterLossMin * 60 * 1000;
+      if (ageMs < pauseMs) {
+        reasons.push({
+          code: 'RISK_CLUSTER_COOLDOWN',
+          reason: `Cluster ${cluster} đang cooldown sau lệnh thua (${Math.ceil((pauseMs - ageMs) / 60000)}m)`,
+        });
+      }
+    }
+
+    return {
+      blocked: reasons.length > 0,
+      reasons,
+      meta: {
+        cluster,
+        windowMin,
+        sameSideTrades: sameSideTrades.length,
+        consecutiveLosses,
+      },
+    };
+  }
+
   evaluate(signal, marketMeta = {}) {
     const reasons = [];
     const codes = [];
@@ -172,6 +256,13 @@ class RiskManager {
     const tradesHour = this.countTradesInWindow(trades, 60);
     const tradesDay = this.countTradesToday(trades);
 
+    const clusterRisk = this.evaluateClusterRisk(signal);
+    if (clusterRisk.blocked) {
+      for (const item of clusterRisk.reasons) {
+        addReject(item.code, item.reason);
+      }
+    }
+
     if (tradesHour >= riskCfg.maxTradesPerHour) addReject('MAX_TRADES_HOUR', 'Đã đạt max số lệnh mỗi giờ');
     if (tradesDay >= riskCfg.maxTradesPerDay) addReject('MAX_TRADES_DAY', 'Đã đạt max số lệnh mỗi ngày');
 
@@ -220,6 +311,7 @@ class RiskManager {
         tradesDay,
         dailyLossPct,
         drawdownPct,
+        clusterRisk: clusterRisk?.meta || null,
       },
     };
   }

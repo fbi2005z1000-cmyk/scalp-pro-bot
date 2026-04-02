@@ -60,6 +60,10 @@ const parseSymbols = (symbols) => {
 
 const configuredSymbols = parseSymbols(process.env.SYMBOLS);
 const resolvedPort = toNumber(process.env.PORT, 3000);
+const normalizedProfile = String(process.env.BOT_PROFILE || 'BALANCED').trim().toUpperCase();
+const profileName = ['SAFE', 'BALANCED', 'AGGRESSIVE'].includes(normalizedProfile)
+  ? normalizedProfile
+  : 'BALANCED';
 
 const normalizeUrl = (value) => {
   const raw = String(value || '').trim();
@@ -108,6 +112,7 @@ const selfPingUrl =
   withPathIfMissing(selfPingBaseUrl, selfPingPath);
 
 const config = {
+  profile: profileName,
   app: {
     name: process.env.APP_NAME || 'Scalp Pro Bot',
     port: resolvedPort,
@@ -216,6 +221,25 @@ const config = {
     marketQualityMinScore: toNumber(process.env.MARKET_QUALITY_MIN_SCORE, 52),
     entryTimingLongMaxRangePos: toNumber(process.env.ENTRY_TIMING_LONG_MAX_RANGE_POS, 0.8),
     entryTimingShortMinRangePos: toNumber(process.env.ENTRY_TIMING_SHORT_MIN_RANGE_POS, 0.2),
+    regimeTrendAdxMin: toNumber(process.env.REGIME_TREND_ADX_MIN, 22),
+    regimeNoisySpreadMul: toNumber(process.env.REGIME_NOISY_SPREAD_MUL, 0.9),
+    qualityDecayEnabled: process.env.QUALITY_DECAY_ENABLED !== 'false',
+    qualityDecayPerCandle: toNumber(process.env.QUALITY_DECAY_PER_CANDLE, 1.5),
+    qualityDecayMaxPenalty: toNumber(process.env.QUALITY_DECAY_MAX_PENALTY, 18),
+    qualityDecayExpireCandles: toNumber(process.env.QUALITY_DECAY_EXPIRE_CANDLES, 6),
+    executionSimEnabled: process.env.EXECUTION_SIM_ENABLED !== 'false',
+    executionSimMinPassScore: toNumber(process.env.EXECUTION_SIM_MIN_PASS_SCORE, 0.3),
+    executionSimMinLiquidity: toNumber(process.env.EXECUTION_SIM_MIN_LIQUIDITY, 35),
+    globalRankingEnabled: process.env.GLOBAL_RANKING_ENABLED !== 'false',
+    globalRankingWindowMs: toNumber(process.env.GLOBAL_RANKING_WINDOW_MS, 5000),
+    globalRankingTopN: toNumber(process.env.GLOBAL_RANKING_TOP_N, 8),
+    globalRankingMinRank: toNumber(process.env.GLOBAL_RANKING_MIN_RANK, 45),
+    globalRankingDispatchCooldownMs: toNumber(process.env.GLOBAL_RANKING_DISPATCH_COOLDOWN_MS, 14000),
+    adaptiveSetupWeightEnabled: process.env.ADAPTIVE_SETUP_WEIGHT_ENABLED !== 'false',
+    adaptiveSetupLookbackTrades: toNumber(process.env.ADAPTIVE_SETUP_LOOKBACK_TRADES, 260),
+    adaptiveSetupMinTrades: toNumber(process.env.ADAPTIVE_SETUP_MIN_TRADES, 10),
+    adaptiveSetupMaxBonus: toNumber(process.env.ADAPTIVE_SETUP_MAX_BONUS, 10),
+    adaptiveSetupMaxPenalty: toNumber(process.env.ADAPTIVE_SETUP_MAX_PENALTY, 12),
     zoneSignalWindowMs: toNumber(process.env.ZONE_SIGNAL_WINDOW_MS, 300000),
     zoneSignalCooldownMs: toNumber(process.env.ZONE_SIGNAL_COOLDOWN_MS, 90000),
     maxSignalsPerZoneWindow: toNumber(process.env.MAX_SIGNALS_PER_ZONE_WINDOW, 2),
@@ -316,6 +340,11 @@ const config = {
     keepRunningOnRiskLock: process.env.KEEP_RUNNING_ON_RISK_LOCK !== 'false',
     lockBotOnError: process.env.LOCK_BOT_ON_ERROR !== 'false',
     syncUnknownPositionAction: (process.env.SYNC_UNKNOWN_POSITION_ACTION || 'PAUSE').toUpperCase(),
+    clusterGuardEnabled: process.env.RISK_CLUSTER_GUARD_ENABLED !== 'false',
+    clusterWindowMin: toNumber(process.env.RISK_CLUSTER_WINDOW_MIN, 120),
+    clusterMaxSameSideTrades: toNumber(process.env.RISK_CLUSTER_MAX_SAME_SIDE_TRADES, 3),
+    clusterMaxConsecutiveLosses: toNumber(process.env.RISK_CLUSTER_MAX_CONSECUTIVE_LOSSES, 2),
+    clusterPauseAfterLossMin: toNumber(process.env.RISK_CLUSTER_PAUSE_AFTER_LOSS_MIN, 45),
     emergencyStop: false,
     initialCapital: toNumber(process.env.INITIAL_CAPITAL, 1000),
     minNotionalUSDT: toNumber(process.env.MIN_NOTIONAL_USDT, 5),
@@ -407,5 +436,36 @@ const config = {
     saveToFile: process.env.LOG_SAVE_TO_FILE !== 'false',
   },
 };
+
+const applyIfUnset = (target, key, envKey, value) => {
+  if (Object.prototype.hasOwnProperty.call(process.env, envKey)) return;
+  target[key] = value;
+};
+
+const applyProfileOverrides = (cfg) => {
+  const profile = String(cfg.profile || 'BALANCED').toUpperCase();
+  if (profile === 'SAFE') {
+    applyIfUnset(cfg.trading, 'signalThreshold', 'SIGNAL_THRESHOLD', 56);
+    applyIfUnset(cfg.trading, 'semiThreshold', 'SEMI_THRESHOLD', 61);
+    applyIfUnset(cfg.trading, 'autoThreshold', 'AUTO_THRESHOLD', 75);
+    applyIfUnset(cfg.trading, 'minRR', 'MIN_RR', 1.2);
+    applyIfUnset(cfg.trading, 'maxSpreadPct', 'MAX_SPREAD_PCT', 0.0012);
+    applyIfUnset(cfg.risk, 'defaultRiskPerTradePct', 'RISK_PER_TRADE_PCT', 0.007);
+    applyIfUnset(cfg.risk, 'maxTradesPerHour', 'MAX_TRADES_PER_HOUR', 4);
+  } else if (profile === 'AGGRESSIVE') {
+    applyIfUnset(cfg.trading, 'signalThreshold', 'SIGNAL_THRESHOLD', 46);
+    applyIfUnset(cfg.trading, 'semiThreshold', 'SEMI_THRESHOLD', 52);
+    applyIfUnset(cfg.trading, 'autoThreshold', 'AUTO_THRESHOLD', 66);
+    applyIfUnset(cfg.trading, 'minRR', 'MIN_RR', 1.05);
+    applyIfUnset(cfg.trading, 'minRewardPct', 'MIN_REWARD_PCT', 0.0009);
+    applyIfUnset(cfg.trading, 'maxSpreadPct', 'MAX_SPREAD_PCT', 0.0019);
+    applyIfUnset(cfg.trading, 'globalRankingTopN', 'GLOBAL_RANKING_TOP_N', 12);
+    applyIfUnset(cfg.binance, 'scannerLoopMs', 'MULTI_SCANNER_LOOP_MS', 4500);
+    applyIfUnset(cfg.risk, 'defaultRiskPerTradePct', 'RISK_PER_TRADE_PCT', 0.01);
+    applyIfUnset(cfg.risk, 'maxTradesPerHour', 'MAX_TRADES_PER_HOUR', 7);
+  }
+};
+
+applyProfileOverrides(config);
 
 module.exports = config;
