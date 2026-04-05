@@ -3,7 +3,7 @@ const EventEmitter = require('events');
 const WebSocket = require('ws');
 const SignalEngine = require('./signalEngine');
 const { BOT_STATES } = require('./stateStore');
-const { formatTs } = require('./utils');
+const { formatTs, formatDateKey } = require('./utils');
 
 class BotEngine {
   constructor({
@@ -92,7 +92,9 @@ class BotEngine {
     this.globalSignalLastDispatchAt = 0;
     this.globalSignalLastDispatched = null;
     this.signalBroadcastMemory = new Map();
+    this.signalFollowTracks = new Map();
     this.priceQuoteCache = new Map();
+    this.signalOutcomeLastNotifyAt = 0;
     this.bound = false;
 
     if (this.orderManager && typeof this.orderManager.setLifecycleHook === 'function') {
@@ -847,6 +849,474 @@ class BotEngine {
     return this.getSignalVariation(signal, prev).meaningful;
   }
 
+  isSpecialWatchSymbol(symbol) {
+    const list = Array.isArray(this.config.trading.specialWatchSymbols)
+      ? this.config.trading.specialWatchSymbols
+      : [];
+    const normalized = String(symbol || '').toUpperCase();
+    return list.includes(normalized);
+  }
+
+  getSignalLevelRank(level) {
+    const normalized = String(level || '').toUpperCase();
+    if (normalized === 'STRONG') return 3;
+    if (normalized === 'MEDIUM') return 2;
+    if (normalized === 'WEAK') return 1;
+    return 0;
+  }
+
+  buildSignalFollowKey(symbol, timeframe) {
+    return `${String(symbol || '').toUpperCase()}:${String(timeframe || '').toLowerCase()}`;
+  }
+
+  upsertSignalFollowTrack(signal, timeframe, candleTime) {
+    if (!this.config.trading.signalFollowEnabled) return;
+    if (!signal || signal.side === 'NO_TRADE') return;
+    const symbol = String(signal.symbol || '').toUpperCase();
+    if (!symbol) return;
+    const tf = String(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const key = this.buildSignalFollowKey(symbol, tf);
+    const prev = this.signalFollowTracks.get(key);
+    const sideChanged = prev && String(prev.side || '').toUpperCase() !== String(signal.side || '').toUpperCase();
+    const now = Date.now();
+    const entryPrice = Number(signal.entryPrice || signal.entryMin || 0);
+    const stopLoss = Number(signal.stopLoss || 0);
+    const tp1 = Number(signal.tp1 || 0);
+    const tp2 = Number(signal.tp2 || 0);
+    const tp3 = Number(signal.tp3 || 0);
+
+    const next = {
+      key,
+      tradeId: signal.tradeId || prev?.tradeId || null,
+      symbol,
+      timeframe: tf,
+      side: String(signal.side || '').toUpperCase(),
+      entryPrice,
+      stopLoss,
+      tp1,
+      tp2,
+      tp3,
+      confidence: Number(signal.confidence || 0),
+      level: String(signal.level || ''),
+      rr: Number(signal.rr || 0),
+      specialWatch: this.isSpecialWatchSymbol(symbol),
+      createdAt: sideChanged || !prev ? now : Number(prev.createdAt || now),
+      updatedAt: now,
+      lastCandleTime: Number(candleTime || prev?.lastCandleTime || 0),
+      lastNotifyAt: sideChanged || !prev ? 0 : Number(prev.lastNotifyAt || 0),
+      candleCount: sideChanged || !prev ? 0 : Number(prev.candleCount || 0),
+      reached: sideChanged || !prev
+        ? { tp1: false, tp2: false, tp3: false, sl: false }
+        : {
+            tp1: Boolean(prev.reached?.tp1),
+            tp2: Boolean(prev.reached?.tp2),
+            tp3: Boolean(prev.reached?.tp3),
+            sl: Boolean(prev.reached?.sl),
+          },
+      closed: false,
+      lastSignal: {
+        ...signal,
+        symbol,
+        signalTimeframe: tf,
+      },
+    };
+    this.signalFollowTracks.set(key, next);
+    this.pruneSignalFollowTracks();
+  }
+
+  pruneSignalFollowTracks() {
+    if (!this.signalFollowTracks.size) return;
+    const now = Date.now();
+    const keepMs = 6 * 60 * 60 * 1000;
+    for (const [key, track] of this.signalFollowTracks.entries()) {
+      const ts = Number(track?.updatedAt || track?.createdAt || 0);
+      if (!ts || now - ts > keepMs) this.signalFollowTracks.delete(key);
+    }
+  }
+
+  getSignalOutcomeWindowMs() {
+    return Math.max(5 * 60 * 1000, Number(this.config.trading?.signalOutcomeWindowMs || 60 * 60 * 1000));
+  }
+
+  getSignalOutcomeStakeUSDT() {
+    return Math.max(1, Number(this.config.trading?.signalOutcomeStakeUsdt || 10));
+  }
+
+  toDisplayPrice(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const abs = Math.abs(n);
+    if (abs >= 1000) return Number(n.toFixed(2));
+    if (abs >= 100) return Number(n.toFixed(3));
+    if (abs >= 1) return Number(n.toFixed(4));
+    if (abs >= 0.1) return Number(n.toFixed(5));
+    if (abs >= 0.01) return Number(n.toFixed(6));
+    if (abs >= 0.001) return Number(n.toFixed(7));
+    if (abs >= 0.0001) return Number(n.toFixed(8));
+    return Number(n.toFixed(10));
+  }
+
+  registerSignalOutcomeTrackFromSignal(signal, timeframe, candleTime, options = {}) {
+    if (!signal || signal.side === 'NO_TRADE') return null;
+    const tradeId = String(signal.tradeId || '').trim();
+    if (!tradeId) return null;
+
+    const tf = String(timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m');
+    const side = String(signal.side || '').toUpperCase();
+    const symbol = String(signal.symbol || '').toUpperCase();
+    const entryPrice = Number(signal.entryPrice || signal.entryMin || signal.entryMax || 0);
+    const stopLoss = Number(signal.stopLoss || 0);
+    const tp1 = Number(signal.tp1 || 0);
+    const tp2 = Number(signal.tp2 || 0);
+    const tp3 = Number(signal.tp3 || 0);
+    if (!(entryPrice > 0 && stopLoss > 0 && tp1 > 0 && tp2 > 0 && tp3 > 0)) return null;
+
+    const sentAt = Date.now();
+    const windowMs = this.getSignalOutcomeWindowMs();
+    const stakeUSDT = this.getSignalOutcomeStakeUSDT();
+    const leverage = Math.max(1, Number(signal.leverage || this.config.binance.leverage || 10));
+
+    const current = this.stateStore.state.signalOutcomes?.active?.[tradeId] || null;
+    this.stateStore.upsertSignalOutcomeTrack({
+      tradeId,
+      symbol,
+      side,
+      timeframe: tf,
+      source: String(options.source || signal.source || 'TOTAL_BRAIN'),
+      status: 'OPEN',
+      sentAt: Number(current?.sentAt || sentAt),
+      expiresAt: Number((current?.sentAt || sentAt) + windowMs),
+      updatedAt: sentAt,
+      candleTime: Number(candleTime || signal.createdAt || 0),
+      entryPrice: this.toDisplayPrice(entryPrice),
+      entryMin: this.toDisplayPrice(Number(signal.entryMin || entryPrice)),
+      entryMax: this.toDisplayPrice(Number(signal.entryMax || entryPrice)),
+      stopLoss: this.toDisplayPrice(stopLoss),
+      tp1: this.toDisplayPrice(tp1),
+      tp2: this.toDisplayPrice(tp2),
+      tp3: this.toDisplayPrice(tp3),
+      confidence: Number(signal.confidence || 0),
+      level: String(signal.level || ''),
+      rr: Number(signal.rr || 0),
+      regime: String(signal.volatilityRegime || signal.market?.volatilityRegime || 'N/A'),
+      stakeUSDT,
+      leverage,
+      feePct: Number(signal.takerFeePct || this.config.trading.takerFeePct || 0.0004) * 2,
+      telegramRoutedAt: sentAt,
+      lastPrice: null,
+      result: null,
+      note: options.isUpdate ? 'UPDATED' : 'SENT',
+    });
+    this.stateStore.pruneSignalOutcomes(Date.now());
+    return tradeId;
+  }
+
+  computeSignalOutcomeResult(track, candle) {
+    if (!track || !candle) return null;
+    const side = String(track.side || '').toUpperCase();
+    if (!['LONG', 'SHORT'].includes(side)) return null;
+    const high = Number(candle.high);
+    const low = Number(candle.low);
+    const close = Number(candle.close);
+    const entryPrice = Number(track.entryPrice || 0);
+    const stopLoss = Number(track.stopLoss || 0);
+    const tp1 = Number(track.tp1 || 0);
+    const tp2 = Number(track.tp2 || 0);
+    const tp3 = Number(track.tp3 || 0);
+    if (!(entryPrice > 0 && stopLoss > 0 && tp1 > 0 && tp2 > 0 && tp3 > 0)) return null;
+
+    const isLong = side === 'LONG';
+    const tp1Hit = isLong ? high >= tp1 : low <= tp1;
+    const tp2Hit = isLong ? high >= tp2 : low <= tp2;
+    const tp3Hit = isLong ? high >= tp3 : low <= tp3;
+    const slHit = isLong ? low <= stopLoss : high >= stopLoss;
+
+    // Quy tắc bảo thủ: nếu cùng nến vừa chạm TP vừa chạm SL thì tính SL.
+    if (slHit) return { status: 'LOSS_SL', hitPrice: stopLoss };
+    if (tp3Hit) return { status: 'WIN_TP3', hitPrice: tp3 };
+    if (tp2Hit) return { status: 'WIN_TP2', hitPrice: tp2 };
+    if (tp1Hit) return { status: 'WIN_TP1', hitPrice: tp1 };
+
+    return {
+      status: 'OPEN',
+      hitPrice: close,
+    };
+  }
+
+  buildSignalOutcomePnl(track, status, hitPrice) {
+    const entry = Number(track.entryPrice || 0);
+    const price = Number(hitPrice || 0);
+    const lev = Math.max(1, Number(track.leverage || this.config.binance.leverage || 10));
+    const stake = Math.max(1, Number(track.stakeUSDT || this.getSignalOutcomeStakeUSDT()));
+    const feePct = Math.max(0, Number(track.feePct || 0));
+    if (!(entry > 0 && price > 0)) {
+      return { movePct: 0, roiPct: 0, pnlUSDT: 0 };
+    }
+
+    const side = String(track.side || '').toUpperCase();
+    const direction = side === 'SHORT' ? -1 : 1;
+    const movePctRaw = ((price - entry) / entry) * 100 * direction;
+    const roiPctRaw = movePctRaw * lev;
+    const roiNetPct = roiPctRaw - feePct * 100;
+    const pnlUSDT = (stake * roiNetPct) / 100;
+
+    return {
+      movePct: Number(movePctRaw.toFixed(4)),
+      roiPct: Number(roiNetPct.toFixed(4)),
+      pnlUSDT: Number(pnlUSDT.toFixed(4)),
+      stakeUSDT: stake,
+    };
+  }
+
+  resolveSignalOutcome(track, status, candle, reason = '') {
+    const hitPrice = Number(
+      status === 'LOSS_SL'
+        ? track.stopLoss
+        : status === 'WIN_TP3'
+        ? track.tp3
+        : status === 'WIN_TP2'
+        ? track.tp2
+        : status === 'WIN_TP1'
+        ? track.tp1
+        : candle?.close || track.entryPrice || 0,
+    );
+    const pnl = this.buildSignalOutcomePnl(track, status, hitPrice);
+    const resolved = this.stateStore.resolveSignalOutcomeTrack(track.tradeId, {
+      status,
+      result: status,
+      reason: reason || status,
+      hitPrice: this.toDisplayPrice(hitPrice),
+      resolvedAt: Date.now(),
+      candleTime: Number(candle?.time || 0),
+      movePct: pnl.movePct,
+      roiPct: pnl.roiPct,
+      pnlUSDT: pnl.pnlUSDT,
+      stakeUSDT: pnl.stakeUSDT,
+    });
+    if (!resolved) return null;
+
+    this.emitLifecycle('SIGNAL_OUTCOME', {
+      tradeId: resolved.tradeId,
+      symbol: resolved.symbol,
+      side: resolved.side,
+      timeframe: resolved.timeframe,
+      source: 'WINRATE_BOT',
+      outcome: resolved.status,
+      pnlUSDT: resolved.pnlUSDT,
+      roiPct: resolved.roiPct,
+      movePct: resolved.movePct,
+    });
+    return resolved;
+  }
+
+  evaluateSignalOutcomesByCandle(symbol, timeframe, candle) {
+    if (!candle || !candle.isClosed) return;
+    const snapshot = this.stateStore.getSignalOutcomeSnapshot();
+    const active = snapshot.active || {};
+    const symbolNorm = String(symbol || '').toUpperCase();
+    if (!symbolNorm) return;
+    const tfNorm = String(timeframe || '').toLowerCase();
+    const now = Date.now();
+
+    for (const track of Object.values(active)) {
+      if (!track || String(track.symbol || '').toUpperCase() !== symbolNorm) continue;
+      if (track.status && String(track.status).toUpperCase() !== 'OPEN') continue;
+      if (tfNorm && String(track.timeframe || '').toLowerCase() !== tfNorm) {
+        // Theo dõi kèo theo chính timeframe phát lệnh; nếu muốn soi dày hơn có thể bỏ chặn này.
+        continue;
+      }
+
+      if (Number(track.expiresAt || 0) > 0 && now > Number(track.expiresAt)) {
+        this.resolveSignalOutcome(track, 'EXPIRED', candle, 'WINDOW_1H_EXPIRED');
+        continue;
+      }
+
+      const result = this.computeSignalOutcomeResult(track, candle);
+      if (!result) continue;
+      if (result.status === 'OPEN') {
+        this.stateStore.upsertSignalOutcomeTrack({
+          ...track,
+          tradeId: track.tradeId,
+          updatedAt: now,
+          lastPrice: this.toDisplayPrice(result.hitPrice),
+        });
+        continue;
+      }
+      this.resolveSignalOutcome(track, result.status, candle, 'PRICE_HIT_TARGET');
+    }
+    this.stateStore.pruneSignalOutcomes(now);
+  }
+
+  getSignalOutcomeReportRange(startTs, endTs = Date.now()) {
+    const snapshot = this.stateStore.getSignalOutcomeSnapshot();
+    const active = Object.values(snapshot.active || {}).filter((x) => Number(x.sentAt || 0) >= startTs);
+    const history = (snapshot.history || []).filter(
+      (x) => Number(x.sentAt || 0) >= startTs && Number(x.sentAt || 0) <= endTs,
+    );
+    const all = [...active, ...history].sort((a, b) => Number(b.sentAt || 0) - Number(a.sentAt || 0));
+    const resolved = history.filter((x) => String(x.status || '').toUpperCase() !== 'OPEN');
+    const wins = resolved.filter((x) => String(x.status || '').toUpperCase().startsWith('WIN'));
+    const losses = resolved.filter((x) => String(x.status || '').toUpperCase().startsWith('LOSS'));
+    const expired = resolved.filter((x) => String(x.status || '').toUpperCase() === 'EXPIRED');
+    const winRate = wins.length + losses.length > 0 ? (wins.length / (wins.length + losses.length)) * 100 : 0;
+    const pnlUSDT = resolved.reduce((sum, x) => sum + Number(x.pnlUSDT || 0), 0);
+    return {
+      startTs,
+      endTs,
+      totalSignals: all.length,
+      activeSignals: active.length,
+      resolvedSignals: resolved.length,
+      wins: wins.length,
+      losses: losses.length,
+      expired: expired.length,
+      winRate,
+      pnlUSDT: Number(pnlUSDT.toFixed(4)),
+      items: all,
+    };
+  }
+
+  async evaluateSignalFollowTrack(symbol, timeframe, candle) {
+    if (!this.config.trading.signalFollowEnabled) return;
+    if (!candle || !candle.isClosed) return;
+    const normalizedSymbol = String(symbol || '').toUpperCase();
+    const normalizedTf = timeframe ? String(timeframe || '').toLowerCase() : '';
+    if (!normalizedSymbol) return;
+
+    // Khi không truyền timeframe (hoặc truyền rỗng), dùng cùng một cây nến đóng để
+    // cập nhật toàn bộ kèo đang theo dõi của cùng symbol => tránh tình trạng "báo xong im".
+    if (!normalizedTf) {
+      const trackList = Array.from(this.signalFollowTracks.values()).filter(
+        (track) =>
+          !track?.closed &&
+          String(track?.symbol || '').toUpperCase() === normalizedSymbol &&
+          String(track?.timeframe || '').length > 0,
+      );
+      for (const track of trackList) {
+        await this.evaluateSignalFollowTrack(normalizedSymbol, String(track.timeframe), candle);
+      }
+      return;
+    }
+
+    const key = this.buildSignalFollowKey(normalizedSymbol, normalizedTf);
+    const track = this.signalFollowTracks.get(key);
+    if (!track || track.closed) return;
+    if (String(track.symbol || '').toUpperCase() !== normalizedSymbol) return;
+
+    const candleTime = Number(candle.time || 0);
+    if (candleTime <= Number(track.lastCandleTime || 0)) return;
+    const price = Number(candle.close || candle.lastPrice || 0);
+    if (!Number.isFinite(price) || price <= 0) return;
+    const entry = Number(track.entryPrice || 0);
+    const sl = Number(track.stopLoss || 0);
+    const tp1 = Number(track.tp1 || 0);
+    const tp2 = Number(track.tp2 || 0);
+    const tp3 = Number(track.tp3 || 0);
+    if (!(entry > 0 && sl > 0 && tp1 > 0 && tp2 > 0 && tp3 > 0)) return;
+
+    const now = Date.now();
+    const maxCandles = Math.max(2, Number(this.config.trading.signalFollowMaxCandles || 12));
+    const perCandle = Math.max(1, Number(this.config.trading.signalFollowUpdateEveryCandles || 1));
+    const cooldownMs = Math.max(2000, Number(this.config.trading.signalFollowCooldownMs || 10000));
+    const nearTpPct = Math.max(0.0001, Number(this.config.trading.signalFollowNearTpPct || 0.0009));
+    const nearSlPct = Math.max(0.0001, Number(this.config.trading.signalFollowNearSlPct || 0.0009));
+    const side = String(track.side || '').toUpperCase();
+
+    const distanceTo = (target) => {
+      if (!(entry > 0 && target > 0)) return Number.POSITIVE_INFINITY;
+      return Math.abs((target - price) / entry);
+    };
+
+    const isLong = side === 'LONG';
+    const hit = {
+      tp1: isLong ? price >= tp1 : price <= tp1,
+      tp2: isLong ? price >= tp2 : price <= tp2,
+      tp3: isLong ? price >= tp3 : price <= tp3,
+      sl: isLong ? price <= sl : price >= sl,
+    };
+    const near = {
+      tp1: distanceTo(tp1) <= nearTpPct,
+      tp2: distanceTo(tp2) <= nearTpPct,
+      tp3: distanceTo(tp3) <= nearTpPct,
+      sl: distanceTo(sl) <= nearSlPct,
+    };
+
+    track.lastCandleTime = candleTime;
+    track.updatedAt = now;
+    track.candleCount = Number(track.candleCount || 0) + 1;
+
+    const changes = [];
+    const reached = track.reached || { tp1: false, tp2: false, tp3: false, sl: false };
+    if (hit.tp1 && !reached.tp1) {
+      reached.tp1 = true;
+      changes.push('✅ Đã chạm TP1');
+    }
+    if (hit.tp2 && !reached.tp2) {
+      reached.tp2 = true;
+      changes.push('✅ Đã chạm TP2');
+    }
+    if (hit.tp3 && !reached.tp3) {
+      reached.tp3 = true;
+      changes.push('🏁 Đã chạm TP3 (kèo hoàn tất)');
+      track.closed = true;
+    }
+    if (hit.sl && !reached.sl) {
+      reached.sl = true;
+      changes.push('🛑 Chạm SL / kèo bị dừng');
+      track.closed = true;
+    }
+    track.reached = reached;
+
+    if (!changes.length) {
+      if (near.tp3) changes.push('⚡ Khả năng cao chạm TP3 nếu giữ đà');
+      else if (near.tp2) changes.push('⚡ Khả năng chạm TP2 đang tăng');
+      else if (near.tp1) changes.push('⚡ Đang áp sát TP1');
+      if (near.sl) changes.push('❗ Áp lực về SL tăng, cần quản trị rủi ro');
+      if (!changes.length && track.candleCount % perCandle === 0) {
+        changes.push('🔄 Kèo vẫn đang được theo dõi liên tục theo nến đóng');
+      }
+    }
+
+    if (track.candleCount >= maxCandles && !track.closed) {
+      changes.push(`⌛ Hết thời hạn theo dõi ${maxCandles} nến, đóng kèo theo dõi`);
+      track.closed = true;
+    }
+
+    const shouldNotify = changes.length > 0 && now - Number(track.lastNotifyAt || 0) >= cooldownMs;
+    if (!shouldNotify) {
+      this.signalFollowTracks.set(key, track);
+      return;
+    }
+
+    track.lastNotifyAt = now;
+    this.signalFollowTracks.set(key, track);
+
+    const baseSignal = {
+      ...(track.lastSignal || {}),
+      symbol: track.symbol,
+      side: track.side,
+      signalTimeframe: track.timeframe,
+      entryPrice: track.entryPrice,
+      entryMin: track.lastSignal?.entryMin || track.entryPrice,
+      entryMax: track.lastSignal?.entryMax || track.entryPrice,
+      stopLoss: track.stopLoss,
+      tp1: track.tp1,
+      tp2: track.tp2,
+      tp3: track.tp3,
+      confidence: track.confidence,
+      livePriceAtSend: price,
+      livePriceAtSendTs: now,
+      livePriceSource: 'CLOSE_CANDLE',
+      liveDeviationPct: entry > 0 ? Math.abs((price - entry) / entry) : 0,
+      tradeId: track.tradeId,
+      specialWatch: track.specialWatch,
+    };
+    await this.telegramService.sendSignalUpdate(baseSignal, changes, null);
+
+    if (track.closed) {
+      this.signalFollowTracks.delete(key);
+    }
+  }
+
   getSignalBroadcastDecision(signal, timeframe, candleTime) {
     const key = this.buildSignalBroadcastKey(signal, timeframe);
     const prev = this.signalBroadcastMemory.get(key);
@@ -1058,6 +1528,21 @@ class BotEngine {
     if (!signal || signal.side === 'NO_TRADE') {
       return { ok: false, reason: 'NO_ACTIONABLE_SIGNAL' };
     }
+    const isSpecialWatch = this.isSpecialWatchSymbol(signal.symbol);
+    if (isSpecialWatch && this.config.trading.specialWatchDisablePreSignal !== false) {
+      const minLevel = String(this.config.trading.specialWatchMinLevel || 'MEDIUM').toUpperCase();
+      const requiredRank = this.getSignalLevelRank(minLevel);
+      const levelRank = this.getSignalLevelRank(signal.level);
+      const candleConfirm = signal?.priceAction?.candleConfirm === true;
+      if (!candleConfirm) {
+        return { ok: false, reason: 'SPECIAL_WATCH_WAIT_CANDLE_CONFIRM', remainingCandles: null };
+      }
+      if (levelRank < requiredRank) {
+        return { ok: false, reason: `SPECIAL_WATCH_LEVEL_TOO_LOW_${signal.level || 'UNKNOWN'}`, remainingCandles: null };
+      }
+      return { ok: true, reason: 'SPECIAL_WATCH_CANDLE_CONFIRM', remainingCandles: 0 };
+    }
+
     const tf = timeframe || signal.signalTimeframe || this.config.timeframe.analysis || '3m';
     const side = String(signal.side || '').toUpperCase();
     const pre = signal.preSignal?.selected || null;
@@ -1234,6 +1719,9 @@ class BotEngine {
     if (!this.config.telegram.preSignalEnabled) return false;
     if (!signal) return false;
     if (this.stateStore.state.activePosition) return false;
+    if (this.isSpecialWatchSymbol(signal.symbol) && this.config.trading.specialWatchDisablePreSignal !== false) {
+      return false;
+    }
 
     const preConsensus = signal.preSignal?.consensus || null;
     if (this.config.trading.preSignalRequireConsensus !== false && !preConsensus?.ok) return false;
@@ -1820,6 +2308,11 @@ class BotEngine {
       const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
       if (!forceAnalyze && lastClosed.time <= prevClose) continue;
       this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+      if (String(tf || '').toLowerCase() === '1m') {
+        await this.evaluateSignalFollowTrack(symbol, null, lastClosed);
+      } else {
+        await this.evaluateSignalFollowTrack(symbol, tf, lastClosed);
+      }
 
       const signal = this.signalEngine.analyze({
         symbol,
@@ -2137,6 +2630,7 @@ class BotEngine {
     }
 
     this.commitSignalBroadcast(payload, tf, candleTime);
+    this.upsertSignalFollowTrack(payload, tf, candleTime);
     return { ok: true, tradeId, signal: payload, update: Boolean(broadcastDecision.isUpdate) };
   }
 
@@ -2144,12 +2638,14 @@ class BotEngine {
     if (!signal || signal.side === 'NO_TRADE') {
       return { ok: false, reason: 'NO_TRADE' };
     }
+    const isSpecialWatch =
+      this.isSpecialWatchSymbol(signal.symbol) && this.config.trading.specialWatchDisablePreSignal !== false;
     const preConsensus = signal.preSignal?.consensus || null;
     const prePack2 = signal.preSignal?.packs?.pack2 || null;
-    if (this.config.trading.preSignalRequireConsensus !== false && !preConsensus?.ok) {
+    if (!isSpecialWatch && this.config.trading.preSignalRequireConsensus !== false && !preConsensus?.ok) {
       return { ok: false, reason: preConsensus?.reason || 'TOTAL_BRAIN_WAIT_PACK_CONSENSUS' };
     }
-    if (this.config.trading.entryConfirmRequirePack2 !== false && !prePack2?.ok) {
+    if (!isSpecialWatch && this.config.trading.entryConfirmRequirePack2 !== false && !prePack2?.ok) {
       return { ok: false, reason: prePack2?.reason || 'TOTAL_BRAIN_WAIT_PACK2' };
     }
 
@@ -2528,6 +3024,11 @@ class BotEngine {
       const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
       if (lastClosed.time <= prevClose) continue;
       this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+      if (String(tf || '').toLowerCase() === '1m') {
+        await this.evaluateSignalFollowTrack(symbol, null, lastClosed);
+      } else {
+        await this.evaluateSignalFollowTrack(symbol, tf, lastClosed);
+      }
       gotClosed = true;
 
       const signal = this.signalEngine.analyze({
@@ -2947,6 +3448,13 @@ class BotEngine {
               });
             }
           });
+        }
+        if (candle.isClosed) {
+          if (String(timeframe || '').toLowerCase() === '1m') {
+            await this.evaluateSignalFollowTrack(symbol, null, candle);
+          } else {
+            await this.evaluateSignalFollowTrack(symbol, timeframe, candle);
+          }
         }
       }
 

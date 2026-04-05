@@ -53,12 +53,16 @@ const parseSymbols = (symbols) => {
       'SEIUSDT',
       'ARBUSDT',
       'OPUSDT',
+      'FIDAUSDT',
     ];
   }
   return parseSymbolList(symbols);
 };
 
-const configuredSymbols = parseSymbols(process.env.SYMBOLS);
+const configuredSpecialWatchSymbols = parseSymbolList(process.env.SPECIAL_WATCH_SYMBOLS, ['FIDAUSDT']);
+const configuredSymbols = Array.from(
+  new Set([...parseSymbols(process.env.SYMBOLS), ...configuredSpecialWatchSymbols]),
+);
 const resolvedPort = toNumber(process.env.PORT, 3000);
 const normalizedProfile = String(process.env.BOT_PROFILE || 'BALANCED').trim().toUpperCase();
 const profileName = ['SAFE', 'BALANCED', 'AGGRESSIVE'].includes(normalizedProfile)
@@ -199,6 +203,11 @@ const config = {
     preSignalPack2MinScore: toNumber(process.env.PRE_SIGNAL_PACK2_MIN_SCORE, 68),
     preSignalRequireConsensus: process.env.PRE_SIGNAL_REQUIRE_CONSENSUS !== 'false',
     entryConfirmRequirePack2: process.env.ENTRY_CONFIRM_REQUIRE_PACK2 !== 'false',
+    specialWatchSymbols: configuredSpecialWatchSymbols,
+    specialWatchDisablePreSignal: process.env.SPECIAL_WATCH_DISABLE_PRE_SIGNAL !== 'false',
+    specialWatchMinLevel: String(process.env.SPECIAL_WATCH_MIN_LEVEL || 'MEDIUM')
+      .trim()
+      .toUpperCase(),
     preSignalLeadCandles1m: toNumber(process.env.PRE_SIGNAL_LEAD_1M, 2),
     preSignalLeadCandles3m: toNumber(process.env.PRE_SIGNAL_LEAD_3M, 1),
     preSignalLeadCandles5m: toNumber(process.env.PRE_SIGNAL_LEAD_5M, 1),
@@ -240,6 +249,15 @@ const config = {
     adaptiveSetupMinTrades: toNumber(process.env.ADAPTIVE_SETUP_MIN_TRADES, 10),
     adaptiveSetupMaxBonus: toNumber(process.env.ADAPTIVE_SETUP_MAX_BONUS, 10),
     adaptiveSetupMaxPenalty: toNumber(process.env.ADAPTIVE_SETUP_MAX_PENALTY, 12),
+    signalFollowEnabled: process.env.SIGNAL_FOLLOW_ENABLED !== 'false',
+    signalFollowUpdateEveryCandles: Math.max(
+      1,
+      toNumber(process.env.SIGNAL_FOLLOW_UPDATE_EVERY_CANDLES, 1),
+    ),
+    signalFollowMaxCandles: Math.max(2, toNumber(process.env.SIGNAL_FOLLOW_MAX_CANDLES, 12)),
+    signalFollowCooldownMs: Math.max(2000, toNumber(process.env.SIGNAL_FOLLOW_COOLDOWN_MS, 10000)),
+    signalFollowNearTpPct: Math.max(0.0001, toNumber(process.env.SIGNAL_FOLLOW_NEAR_TP_PCT, 0.0009)),
+    signalFollowNearSlPct: Math.max(0.0001, toNumber(process.env.SIGNAL_FOLLOW_NEAR_SL_PCT, 0.0009)),
     zoneSignalWindowMs: toNumber(process.env.ZONE_SIGNAL_WINDOW_MS, 300000),
     zoneSignalCooldownMs: toNumber(process.env.ZONE_SIGNAL_COOLDOWN_MS, 90000),
     maxSignalsPerZoneWindow: toNumber(process.env.MAX_SIGNALS_PER_ZONE_WINDOW, 2),
@@ -286,6 +304,7 @@ const config = {
       'TONUSDT',
       'TIAUSDT',
       'JUPUSDT',
+      'FIDAUSDT',
     ]),
     scpSymbols: parseSymbolList(process.env.SCP_SYMBOLS, [
       'ADAUSDT',
@@ -372,6 +391,7 @@ const config = {
       'TONUSDT',
       'TIAUSDT',
       'JUPUSDT',
+      'FIDAUSDT',
     ]),
     secondaryEnabled: process.env.TELEGRAM_SECONDARY_ENABLED !== 'false',
     secondaryName: process.env.TELEGRAM_SECONDARY_NAME || 'BOT SCP',
@@ -398,6 +418,7 @@ const config = {
     primaryIcon: process.env.TELEGRAM_PRIMARY_ICON || '🔵',
     secondaryIcon: process.env.TELEGRAM_SECONDARY_ICON || '🟢',
     sentryIcon: process.env.TELEGRAM_SENTRY_ICON || '🛰️',
+    specialWatchSymbols: configuredSpecialWatchSymbols,
     routeUnknownToPrimary: process.env.TELEGRAM_ROUTE_UNKNOWN_TO_PRIMARY !== 'false',
     sendSystemToAllRoutes: process.env.TELEGRAM_SEND_SYSTEM_TO_ALL !== 'false',
     parseMode: process.env.TELEGRAM_PARSE_MODE || 'HTML',

@@ -37,13 +37,17 @@ class TelegramService {
 
     const primaryIds = parseIds(this.config.chatId);
     if (this.config.token && primaryIds.length) {
+      const primarySymbols = new Set([
+        ...Array.from(toSet(this.config.highLiqSymbols)),
+        ...Array.from(toSet(this.config.specialWatchSymbols)),
+      ]);
       routes.push({
         id: 'PRIMARY',
         name: this.config.primaryName || 'BOT THANH KHOẢN CAO',
         icon: this.config.primaryIcon || '🔵',
         token: this.config.token,
         chatIds: primaryIds,
-        symbols: toSet(this.config.highLiqSymbols),
+        symbols: primarySymbols,
       });
     }
 
@@ -108,6 +112,7 @@ class TelegramService {
 
   getSymbolIcon(symbol) {
     const s = String(symbol || '').toUpperCase();
+    if (s.includes('FIDA')) return '❗🔴';
     if (s.includes('BTC')) return '₿🟠';
     if (s.includes('ETH')) return 'Ξ🟣';
     if (s.includes('SOL')) return '◎🟢';
@@ -134,6 +139,12 @@ class TelegramService {
     if (s.includes('OP')) return '🟥';
     if (s.includes('UNI')) return '🦄';
     return '🔹';
+  }
+
+  isSpecialWatchSymbol(symbol) {
+    const list = Array.isArray(this.config.specialWatchSymbols) ? this.config.specialWatchSymbols : [];
+    const s = String(symbol || '').toUpperCase();
+    return list.includes(s);
   }
 
   getBotBadge(options = {}) {
@@ -841,6 +852,11 @@ class TelegramService {
 
     const coinIcon = this.getSymbolIcon(signalData.symbol);
     const botBadge = this.getBotBadge({ symbol: signalData.symbol });
+    const specialWatch = this.isSpecialWatchSymbol(signalData.symbol) || Boolean(signalData.specialWatch);
+    const specialWatchLine = specialWatch ? '❗🔴 <b>COIN ĐẶC BIỆT LỜI NHANH</b>' : '';
+    const specialWatchRuleLine = specialWatch
+      ? '🚨 Chỉ báo khi nến đẹp đã xác nhận, không báo trước.'
+      : '';
     const timeframe = esc(signalData.signalTimeframe || '3m');
     const preConsensus = signalData?.preSignal?.consensus || null;
     const prePack1 = signalData?.preSignal?.packs?.pack1 || null;
@@ -850,9 +866,11 @@ class TelegramService {
       : '';
     const text = [
       `${botBadge}`,
+      specialWatchLine,
       `${this.config.sentryIcon || '🛰️'} <b>BOT TRỰC ${esc(signalData.symbol)}</b>`,
       `✅ <b>ENTRY CONFIRM ${topBadge}</b> | ${sideMeta.titleIcon} <b>${sideMeta.label}</b> | ${coinIcon} <b>${esc(signalData.symbol)}</b> | <b>${timeframe}</b>`,
       topLine,
+      specialWatchRuleLine,
       ``,
       `🕒 <b>Giá tham chiếu (nến đóng):</b> ${fmtPrice(signalData.entryPrice)}`,
       signalData.livePriceAtSend ? `⚡ <b>Giá realtime lúc gửi:</b> ${fmtPrice(signalData.livePriceAtSend)}` : '',
@@ -904,6 +922,8 @@ class TelegramService {
     const sideIcon = side === 'LONG' ? '🟢' : side === 'SHORT' ? '🔴' : '⚪';
     const coinIcon = this.getSymbolIcon(signalData.symbol);
     const botBadge = this.getBotBadge({ symbol: signalData.symbol });
+    const specialWatch = this.isSpecialWatchSymbol(signalData.symbol) || Boolean(signalData.specialWatch);
+    const specialWatchLine = specialWatch ? '❗🔴 <b>COIN ĐẶC BIỆT LỜI NHANH</b> | Theo dõi liên tục kèo đặc biệt' : '';
     const tf = String(signalData.signalTimeframe || signalData.timeframe || '3m');
     const ranking = signalData.globalRanking || {};
     const topLine = ranking.isTop
@@ -924,6 +944,7 @@ class TelegramService {
 
     const msg = [
       `${botBadge}`,
+      specialWatchLine,
       `🔄 <b>CẬP NHẬT KÈO</b> | ${sideIcon} <b>${esc(side || 'N/A')}</b> | ${coinIcon} <b>${esc(signalData.symbol || 'N/A')}</b> | <b>${esc(tf)}</b>`,
       topLine,
       '',

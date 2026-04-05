@@ -163,6 +163,10 @@ class StateStore {
         indexPrice: 0,
         fundingRate: 0,
       },
+      signalOutcomes: {
+        active: {},
+        history: [],
+      },
     };
 
     this.initializeSymbolBuckets(config.binance.symbols);
@@ -234,6 +238,10 @@ class StateStore {
       orderBook: {
         ...this.state.orderBook,
         ...(next.orderBook || {}),
+      },
+      signalOutcomes: {
+        active: { ...(next.signalOutcomes?.active || {}) },
+        history: Array.isArray(next.signalOutcomes?.history) ? next.signalOutcomes.history.slice(0, 4000) : [],
       },
     };
 
@@ -384,6 +392,98 @@ class StateStore {
 
   setOrderBook(orderBook) {
     this.state.orderBook = { ...this.state.orderBook, ...orderBook };
+  }
+
+  upsertSignalOutcomeTrack(track) {
+    if (!track || !track.tradeId) return;
+    if (!this.state.signalOutcomes || typeof this.state.signalOutcomes !== 'object') {
+      this.state.signalOutcomes = { active: {}, history: [] };
+    }
+    if (!this.state.signalOutcomes.active || typeof this.state.signalOutcomes.active !== 'object') {
+      this.state.signalOutcomes.active = {};
+    }
+    if (!Array.isArray(this.state.signalOutcomes.history)) {
+      this.state.signalOutcomes.history = [];
+    }
+
+    const prev = this.state.signalOutcomes.active[track.tradeId];
+    this.state.signalOutcomes.active[track.tradeId] = {
+      ...(prev || {}),
+      ...track,
+      tradeId: String(track.tradeId),
+      sentAt: Number(track.sentAt || prev?.sentAt || nowTs()),
+      expiresAt: Number(track.expiresAt || prev?.expiresAt || nowTs() + 60 * 60 * 1000),
+      status: track.status || prev?.status || 'OPEN',
+      updatedAt: Number(track.updatedAt || nowTs()),
+      open: true,
+    };
+  }
+
+  resolveSignalOutcomeTrack(tradeId, resolution = {}) {
+    const id = String(tradeId || '').trim();
+    if (!id) return null;
+    if (!this.state.signalOutcomes?.active?.[id]) return null;
+
+    const active = this.state.signalOutcomes.active[id];
+    const resolvedAt = Number(resolution.resolvedAt || nowTs());
+    const row = {
+      ...active,
+      ...resolution,
+      tradeId: id,
+      open: false,
+      status: resolution.status || active.status || 'UNKNOWN',
+      resolvedAt,
+      updatedAt: resolvedAt,
+    };
+
+    delete this.state.signalOutcomes.active[id];
+    this.state.signalOutcomes.history.unshift(row);
+    if (this.state.signalOutcomes.history.length > 4000) {
+      this.state.signalOutcomes.history = this.state.signalOutcomes.history.slice(0, 4000);
+    }
+    return row;
+  }
+
+  pruneSignalOutcomes(now = nowTs()) {
+    if (!this.state.signalOutcomes?.active) return;
+    for (const [tradeId, track] of Object.entries(this.state.signalOutcomes.active)) {
+      const ts = Number(track?.updatedAt || track?.sentAt || 0);
+      if (!ts || now - ts > 3 * 24 * 60 * 60 * 1000) {
+        delete this.state.signalOutcomes.active[tradeId];
+      }
+    }
+
+    if (!Array.isArray(this.state.signalOutcomes.history)) return;
+    const cutoff = now - 10 * 24 * 60 * 60 * 1000;
+    this.state.signalOutcomes.history = this.state.signalOutcomes.history
+      .filter((item) => Number(item?.sentAt || item?.resolvedAt || 0) >= cutoff)
+      .slice(0, 4000);
+  }
+
+  getSignalOutcomeSnapshot() {
+    const active = this.state.signalOutcomes?.active || {};
+    const history = Array.isArray(this.state.signalOutcomes?.history) ? this.state.signalOutcomes.history : [];
+    return {
+      active: { ...active },
+      history: history.slice(),
+    };
+  }
+
+  getSignalOutcomeSummary() {
+    const active = this.state.signalOutcomes?.active || {};
+    const history = Array.isArray(this.state.signalOutcomes?.history) ? this.state.signalOutcomes.history : [];
+    const totalResolved = history.length;
+    const wins = history.filter((x) => String(x?.status || '').toUpperCase().startsWith('WIN')).length;
+    const losses = history.filter((x) => String(x?.status || '').toUpperCase().startsWith('LOSS')).length;
+    const expired = history.filter((x) => String(x?.status || '').toUpperCase() === 'EXPIRED').length;
+    return {
+      active: Object.keys(active).length,
+      totalResolved,
+      wins,
+      losses,
+      expired,
+      winRate: wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0,
+    };
   }
 
   registerReconnect() {
@@ -542,6 +642,7 @@ class StateStore {
       lastSignal: this.state.lastSignal,
       lastReject: this.state.lastReject,
       lastError: this.state.lastError,
+      signalOutcomes: this.getSignalOutcomeSummary(),
     };
   }
 }
@@ -550,4 +651,3 @@ module.exports = {
   StateStore,
   BOT_STATES,
 };
-
