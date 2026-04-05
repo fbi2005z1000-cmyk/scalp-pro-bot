@@ -843,6 +843,10 @@ button:hover {
   padding: 8px;
 }
 
+.fleet-subhead {
+  margin-top: 14px;
+}
+
 .fleet-columns {
   margin-top: 10px;
   display: grid;

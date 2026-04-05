@@ -95,6 +95,10 @@
     fleetSummary: document.getElementById('fleetSummary'),
     fleetActiveList: document.getElementById('fleetActiveList'),
     fleetInactiveList: document.getElementById('fleetInactiveList'),
+    outcomeFleetBadge: document.getElementById('outcomeFleetBadge'),
+    outcomeFleetSummary: document.getElementById('outcomeFleetSummary'),
+    outcomeFleetActiveList: document.getElementById('outcomeFleetActiveList'),
+    outcomeFleetInactiveList: document.getElementById('outcomeFleetInactiveList'),
     rsGuidePriceNow: document.getElementById('rsGuidePriceNow'),
     rsMeaningGrid: document.getElementById('rsMeaningGrid'),
     rsScenarioBox: document.getElementById('rsScenarioBox'),
@@ -1610,78 +1614,128 @@
 
   function renderFleet(status) {
     if (!el.fleetSummary || !el.fleetActiveList || !el.fleetInactiveList || !el.fleetBadge) return;
-    const direct = status?.fleet?.directBots || {};
-    const bots = Array.isArray(direct.bots) ? direct.bots : [];
-    const watchdog = direct.watchdog || {};
-    const staleMs = Number(direct.staleMs || status?.scanner?.staleMs || 0);
 
-    if (!bots.length) {
-      el.fleetBadge.className = 'badge warn';
-      el.fleetBadge.textContent = 'Chưa nhận fleet bot';
-      el.fleetSummary.innerHTML = `<div class="fleet-empty">Chưa có dữ liệu bot trực coin.</div>`;
-      el.fleetActiveList.innerHTML = `<div class="fleet-empty">N/A</div>`;
-      el.fleetInactiveList.innerHTML = `<div class="fleet-empty">N/A</div>`;
-      return;
-    }
+    const renderFleetBlock = (fleetData, refs, options = {}) => {
+      const {
+        summaryEl,
+        activeEl,
+        inactiveEl,
+        badgeEl,
+      } = refs;
+      if (!summaryEl || !activeEl || !inactiveEl || !badgeEl) return;
 
-    const active = bots.filter((b) => b.health === 'ACTIVE');
-    const stalled = bots.filter((b) => b.health === 'STALLED');
-    const inactive = bots.filter((b) => b.health === 'INACTIVE');
+      const bots = Array.isArray(fleetData?.bots) ? fleetData.bots : [];
+      const watchdog = fleetData?.watchdog || {};
+      const staleMs = Number(fleetData?.staleMs || status?.scanner?.staleMs || 0);
+      const emptyText = options.emptyText || 'Chưa có dữ liệu bot.';
+      const activeEmptyText = options.activeEmptyText || 'Không có bot ACTIVE.';
+      const inactiveEmptyText = options.inactiveEmptyText || 'Tất cả bot đang hoạt động ổn định.';
+      const extraItems = Array.isArray(options.extraItems) ? options.extraItems : [];
 
-    const requestedCount = Number(direct.requestedCount || bots.length);
-    const runningCount = Number(direct.runningCount || active.length);
-    const healthPct = requestedCount > 0 ? Math.round((runningCount / requestedCount) * 100) : 0;
-    const good = inactive.length === 0 && stalled.length === 0;
-    el.fleetBadge.className = good ? 'badge long' : 'badge warn';
-    el.fleetBadge.textContent = good
-      ? `Ổn định ${runningCount}/${requestedCount}`
-      : `Cần phục hồi ${requestedCount - runningCount}/${requestedCount}`;
+      if (!bots.length) {
+        badgeEl.className = 'badge warn';
+        badgeEl.textContent = 'Chưa nhận fleet bot';
+        summaryEl.innerHTML = `<div class="fleet-empty">${emptyText}</div>`;
+        activeEl.innerHTML = `<div class="fleet-empty">N/A</div>`;
+        inactiveEl.innerHTML = `<div class="fleet-empty">N/A</div>`;
+        return;
+      }
 
-    el.fleetSummary.innerHTML = [
-      ['Bot yêu cầu', `${requestedCount}`],
-      ['Bot hoạt động', `${runningCount}`],
-      ['Bot lỗi/stalled', `${inactive.length + stalled.length}`],
-      ['Health', `${healthPct}%`],
-      ['Watchdog', watchdog.enabled ? `BẬT (${formatAgoMs(watchdog.watchdogMs)})` : 'TẮT'],
-      ['Đã tự phục hồi', `${watchdog.recoveryCount || 0}`],
-      ['Khởi động lại scanner', `${watchdog.scannerRestartCount || 0}`],
-      ['Stale ngưỡng', staleMs ? formatAgoMs(staleMs) : 'N/A'],
-      ['Watchdog gần nhất', watchdog.lastRunAt ? formatByTimezone(new Date(watchdog.lastRunAt), true) : 'N/A'],
-    ]
-      .map(
-        ([k, v]) => `<div class="item"><div class="k">${k}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
-      )
-      .join('');
+      const active = bots.filter((b) => b.health === 'ACTIVE');
+      const stalled = bots.filter((b) => b.health === 'STALLED');
+      const inactive = bots.filter((b) => b.health === 'INACTIVE');
 
-    const sortByRun = (a, b) => Number(b.lastRunAt || 0) - Number(a.lastRunAt || 0);
-    const renderBotRow = (bot) => {
-      const lastRunText = bot.lastRunAt ? formatByTimezone(new Date(bot.lastRunAt), true) : 'N/A';
-      const staleText = Number.isFinite(bot.staleForMs) ? formatAgoMs(bot.staleForMs) : 'N/A';
-      const healthClass =
-        bot.health === 'ACTIVE' ? 'long' : bot.health === 'STALLED' ? 'warn' : 'short';
-      const err = bot.lastError ? ` | lỗi: ${bot.lastError}` : '';
-      return `<div class="fleet-row">
-        <div class="head">
-          <span class="symbol">${bot.symbol}</span>
-          <span class="badge ${healthClass}">${bot.health || bot.state || 'N/A'}</span>
-        </div>
-        <div class="meta">
-          state=${bot.state || 'N/A'} | tf=${bot.timeframe || 'N/A'} | chạy gần nhất=${lastRunText}<br>
-          stale=${staleText} | scan=${bot.analysisCount || 0} | signal=${bot.signalCount || 0} | reject=${bot.rejectCount || 0}${err}
-        </div>
-      </div>`;
+      const requestedCount = Number(fleetData.requestedCount || bots.length);
+      const runningCount = Number(fleetData.runningCount || active.length);
+      const healthPct = requestedCount > 0 ? Math.round((runningCount / requestedCount) * 100) : 0;
+      const good = inactive.length === 0 && stalled.length === 0;
+      badgeEl.className = good ? 'badge long' : 'badge warn';
+      badgeEl.textContent = good
+        ? `Ổn định ${runningCount}/${requestedCount}`
+        : `Cần phục hồi ${requestedCount - runningCount}/${requestedCount}`;
+
+      const summaryRows = [
+        ['Bot yêu cầu', `${requestedCount}`],
+        ['Bot hoạt động', `${runningCount}`],
+        ['Bot lỗi/stalled', `${inactive.length + stalled.length}`],
+        ['Health', `${healthPct}%`],
+        ['Watchdog', watchdog.enabled ? `BẬT (${formatAgoMs(watchdog.watchdogMs)})` : 'TẮT'],
+        ['Đã tự phục hồi', `${watchdog.recoveryCount || 0}`],
+        ['Stale ngưỡng', staleMs ? formatAgoMs(staleMs) : 'N/A'],
+        ['Watchdog gần nhất', watchdog.lastRunAt ? formatByTimezone(new Date(watchdog.lastRunAt), true) : 'N/A'],
+        ...extraItems,
+      ];
+
+      summaryEl.innerHTML = summaryRows
+        .map(
+          ([k, v]) => `<div class="item"><div class="k">${k}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
+        )
+        .join('');
+
+      const sortByRun = (a, b) => Number(b.lastRunAt || 0) - Number(a.lastRunAt || 0);
+      const renderBotRow = (bot) => {
+        const lastRunText = bot.lastRunAt ? formatByTimezone(new Date(bot.lastRunAt), true) : 'N/A';
+        const staleText = Number.isFinite(bot.staleForMs) ? formatAgoMs(bot.staleForMs) : 'N/A';
+        const healthClass =
+          bot.health === 'ACTIVE' ? 'long' : bot.health === 'STALLED' ? 'warn' : 'short';
+        const err = bot.lastError ? ` | lỗi: ${bot.lastError}` : '';
+        const processedText = Number.isFinite(Number(bot.processed))
+          ? ` | processed=${bot.processed || 0}`
+          : '';
+        return `<div class="fleet-row">
+          <div class="head">
+            <span class="symbol">${bot.symbol}</span>
+            <span class="badge ${healthClass}">${bot.health || bot.state || 'N/A'}</span>
+          </div>
+          <div class="meta">
+            state=${bot.state || 'N/A'} | tf=${bot.timeframe || 'N/A'} | chạy gần nhất=${lastRunText}<br>
+            stale=${staleText} | check=${bot.checkCount || bot.analysisCount || 0} | open=${bot.openTracks || 0} | win=${bot.resolvedWins || 0} | loss=${bot.resolvedLosses || 0} | exp=${bot.resolvedExpired || 0}${processedText}${err}
+          </div>
+        </div>`;
+      };
+
+      const activeList = active.sort(sortByRun);
+      const inactiveList = [...stalled, ...inactive].sort(sortByRun);
+
+      activeEl.innerHTML = activeList.length
+        ? activeList.map(renderBotRow).join('')
+        : `<div class="fleet-empty">${activeEmptyText}</div>`;
+
+      inactiveEl.innerHTML = inactiveList.length
+        ? inactiveList.map(renderBotRow).join('')
+        : `<div class="fleet-empty">${inactiveEmptyText}</div>`;
     };
 
-    const activeList = active.sort(sortByRun);
-    const inactiveList = [...stalled, ...inactive].sort(sortByRun);
+    const direct = status?.fleet?.directBots || {};
+    renderFleetBlock(
+      direct,
+      {
+        summaryEl: el.fleetSummary,
+        activeEl: el.fleetActiveList,
+        inactiveEl: el.fleetInactiveList,
+        badgeEl: el.fleetBadge,
+      },
+      {
+        emptyText: 'Chưa có dữ liệu bot trực coin.',
+        extraItems: [['Khởi động lại scanner', `${direct?.watchdog?.scannerRestartCount || 0}`]],
+      },
+    );
 
-    el.fleetActiveList.innerHTML = activeList.length
-      ? activeList.map(renderBotRow).join('')
-      : `<div class="fleet-empty">Không có bot ACTIVE.</div>`;
-
-    el.fleetInactiveList.innerHTML = inactiveList.length
-      ? inactiveList.map(renderBotRow).join('')
-      : `<div class="fleet-empty">Tất cả bot đang hoạt động ổn định.</div>`;
+    if (el.outcomeFleetSummary && el.outcomeFleetActiveList && el.outcomeFleetInactiveList && el.outcomeFleetBadge) {
+      const outcome = status?.fleet?.outcomeBots || {};
+      renderFleetBlock(
+        outcome,
+        {
+          summaryEl: el.outcomeFleetSummary,
+          activeEl: el.outcomeFleetActiveList,
+          inactiveEl: el.outcomeFleetInactiveList,
+          badgeEl: el.outcomeFleetBadge,
+        },
+        {
+          emptyText: 'Chưa có dữ liệu bot WinRate/TP-SL.',
+        },
+      );
+    }
   }
 
   function renderLogs(logs) {

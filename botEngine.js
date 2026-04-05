@@ -56,6 +56,10 @@ class BotEngine {
     this.directBotRecoveryCount = 0;
     this.directBotRestartCount = 0;
     this.directBotLastWatchdogAt = 0;
+    this.outcomeBots = new Map();
+    this.outcomeBotWatchdogTimer = null;
+    this.outcomeBotRecoveryCount = 0;
+    this.outcomeBotLastWatchdogAt = 0;
     this.positionPulseTimer = null;
     this.positionPulseEndAt = 0;
     this.positionPulseLastPrice = null;
@@ -316,6 +320,7 @@ class BotEngine {
       this.stateStore.setBotRunning(true);
     }
     this.initializeDirectBots();
+    this.initializeOutcomeBots();
     await this.bootstrapCandles(this.stateStore.state.symbol);
     await this.bootstrapScannerSymbols();
     this.bindWebsocket();
@@ -323,6 +328,7 @@ class BotEngine {
     this.connectScannerMarketStream();
     this.startMultiSymbolScanner();
     this.startDirectBotWatchdog();
+    this.startOutcomeBotWatchdog();
   }
 
   bindWebsocket() {
@@ -1008,6 +1014,7 @@ class BotEngine {
       note: options.isUpdate ? 'UPDATED' : 'SENT',
     });
     this.stateStore.pruneSignalOutcomes(Date.now());
+    this.syncOutcomeBotOpenCount(symbol);
     return tradeId;
   }
 
@@ -1116,7 +1123,17 @@ class BotEngine {
     const symbolNorm = String(symbol || '').toUpperCase();
     if (!symbolNorm) return;
     const tfNorm = String(timeframe || '').toLowerCase();
+    if (!tfNorm) return;
     const now = Date.now();
+    const existingBot = this.outcomeBots.get(symbolNorm);
+    const candleKey = `${tfNorm}:${Number(candle.time || 0)}`;
+    if (existingBot?.lastCandleKey === candleKey) return;
+
+    let resolvedWins = 0;
+    let resolvedLosses = 0;
+    let resolvedExpired = 0;
+    let processed = 0;
+    let latestOutcome = null;
 
     for (const track of Object.values(active)) {
       if (!track || String(track.symbol || '').toUpperCase() !== symbolNorm) continue;
@@ -1127,12 +1144,17 @@ class BotEngine {
       }
 
       if (Number(track.expiresAt || 0) > 0 && now > Number(track.expiresAt)) {
-        this.resolveSignalOutcome(track, 'EXPIRED', candle, 'WINDOW_1H_EXPIRED');
+        const resolved = this.resolveSignalOutcome(track, 'EXPIRED', candle, 'WINDOW_1H_EXPIRED');
+        if (resolved) {
+          resolvedExpired += 1;
+          latestOutcome = resolved;
+        }
         continue;
       }
 
       const result = this.computeSignalOutcomeResult(track, candle);
       if (!result) continue;
+      processed += 1;
       if (result.status === 'OPEN') {
         this.stateStore.upsertSignalOutcomeTrack({
           ...track,
@@ -1142,9 +1164,23 @@ class BotEngine {
         });
         continue;
       }
-      this.resolveSignalOutcome(track, result.status, candle, 'PRICE_HIT_TARGET');
+      const resolved = this.resolveSignalOutcome(track, result.status, candle, 'PRICE_HIT_TARGET');
+      if (!resolved) continue;
+      latestOutcome = resolved;
+      if (String(result.status || '').startsWith('WIN')) resolvedWins += 1;
+      else if (String(result.status || '').startsWith('LOSS')) resolvedLosses += 1;
     }
     this.stateStore.pruneSignalOutcomes(now);
+    this.syncOutcomeBotOpenCount(symbolNorm, {
+      timeframe: tfNorm,
+      processed,
+      resolvedWins,
+      resolvedLosses,
+      resolvedExpired,
+      latestOutcome,
+      lastCandleKey: candleKey,
+      now,
+    });
   }
 
   getSignalOutcomeReportRange(startTs, endTs = Date.now()) {
@@ -1902,6 +1938,7 @@ class BotEngine {
 
   initializeDirectBots() {
     const symbols = this.getScannerSymbols();
+    const now = Date.now();
     const symbolSet = new Set(symbols);
     for (const existing of this.directBots.keys()) {
       if (!symbolSet.has(existing)) {
@@ -1913,19 +1950,144 @@ class BotEngine {
       if (current) continue;
       this.directBots.set(symbol, {
         symbol,
-        state: 'IDLE',
+        state: 'WARMING',
         timeframe: null,
         inFlight: false,
         analysisCount: 0,
         signalCount: 0,
         rejectCount: 0,
-        lastRunAt: 0,
+        lastRunAt: now,
         lastSignalAt: 0,
         lastSignal: null,
         lastRejectCode: null,
         lastError: null,
       });
     }
+  }
+
+  initializeOutcomeBots() {
+    const symbols = this.getScannerSymbols();
+    const now = Date.now();
+    const symbolSet = new Set(symbols);
+    for (const existing of this.outcomeBots.keys()) {
+      if (!symbolSet.has(existing)) {
+        this.outcomeBots.delete(existing);
+      }
+    }
+    for (const symbol of symbols) {
+      const current = this.outcomeBots.get(symbol);
+      if (current) continue;
+      this.outcomeBots.set(symbol, {
+        symbol,
+        state: 'WARMING',
+        timeframe: null,
+        checkCount: 0,
+        openTracks: 0,
+        resolvedWins: 0,
+        resolvedLosses: 0,
+        resolvedExpired: 0,
+        lastRunAt: now,
+        lastResolveAt: 0,
+        lastOutcome: null,
+        lastError: null,
+        lastCandleKey: null,
+      });
+    }
+  }
+
+  setOutcomeBotState(symbol, patch = {}) {
+    const base =
+      this.outcomeBots.get(symbol) ||
+      {
+        symbol,
+        state: 'IDLE',
+        timeframe: null,
+        checkCount: 0,
+        openTracks: 0,
+        resolvedWins: 0,
+        resolvedLosses: 0,
+        resolvedExpired: 0,
+        lastRunAt: 0,
+        lastResolveAt: 0,
+        lastOutcome: null,
+        lastError: null,
+        lastCandleKey: null,
+      };
+    this.outcomeBots.set(symbol, { ...base, ...patch });
+  }
+
+  syncOutcomeBotOpenCount(symbol, extra = {}) {
+    const symbolNorm = String(symbol || '').toUpperCase();
+    if (!symbolNorm) return;
+
+    const snapshot = this.stateStore.getSignalOutcomeSnapshot();
+    const openTracks = Object.values(snapshot.active || {}).filter(
+      (track) => String(track?.symbol || '').toUpperCase() === symbolNorm,
+    ).length;
+
+    const prev = this.outcomeBots.get(symbolNorm) || {};
+    const now = Number(extra.now || Date.now());
+    const resolvedWins = Number(prev.resolvedWins || 0) + Number(extra.resolvedWins || 0);
+    const resolvedLosses = Number(prev.resolvedLosses || 0) + Number(extra.resolvedLosses || 0);
+    const resolvedExpired = Number(prev.resolvedExpired || 0) + Number(extra.resolvedExpired || 0);
+
+    this.setOutcomeBotState(symbolNorm, {
+      symbol: symbolNorm,
+      state: openTracks > 0 ? 'TRACKING' : 'IDLE',
+      timeframe: extra.timeframe || prev.timeframe || null,
+      checkCount: Number(prev.checkCount || 0) + 1,
+      openTracks,
+      resolvedWins,
+      resolvedLosses,
+      resolvedExpired,
+      lastRunAt: now,
+      lastResolveAt: extra.latestOutcome ? now : Number(prev.lastResolveAt || 0),
+      lastOutcome: extra.latestOutcome || prev.lastOutcome || null,
+      lastError: null,
+      lastCandleKey: extra.lastCandleKey || prev.lastCandleKey || null,
+      processed: Number(extra.processed || 0),
+    });
+  }
+
+  classifyOutcomeBotHealth(bot, now = Date.now()) {
+    if (!bot) return 'INACTIVE';
+    if (String(bot.state || '').toUpperCase() === 'ERROR') return 'INACTIVE';
+    const lastRunAt = Number(bot.lastRunAt || 0);
+    if (!lastRunAt) return 'INACTIVE';
+    const staleMs = this.getDirectBotStaleMs();
+    if (now - lastRunAt > staleMs) return 'STALLED';
+    return 'ACTIVE';
+  }
+
+  getOutcomeBotHealthSnapshot() {
+    this.initializeOutcomeBots();
+    const symbols = this.getScannerSymbols();
+    const now = Date.now();
+    const staleMs = this.getDirectBotStaleMs();
+    const bots = symbols
+      .map((symbol) => this.outcomeBots.get(symbol))
+      .filter(Boolean)
+      .map((bot) => {
+        const health = this.classifyOutcomeBotHealth(bot, now);
+        return {
+          ...bot,
+          health,
+          staleForMs: bot.lastRunAt ? Math.max(0, now - bot.lastRunAt) : null,
+        };
+      });
+    const activeBots = bots.filter((b) => b.health === 'ACTIVE');
+    const stalledBots = bots.filter((b) => b.health === 'STALLED');
+    const inactiveBots = bots.filter((b) => b.health === 'INACTIVE');
+    return {
+      staleMs,
+      bots,
+      activeBots,
+      stalledBots,
+      inactiveBots,
+      activeCount: activeBots.length,
+      stalledCount: stalledBots.length,
+      inactiveCount: inactiveBots.length,
+    };
   }
 
   setDirectBotState(symbol, patch = {}) {
@@ -2059,6 +2221,7 @@ class BotEngine {
   }
 
   getDirectBotHealthSnapshot() {
+    this.initializeDirectBots();
     const symbols = this.getScannerSymbols();
     const now = Date.now();
     const staleMs = this.getDirectBotStaleMs();
@@ -2110,6 +2273,47 @@ class BotEngine {
     if (!this.directBotWatchdogTimer) return;
     clearInterval(this.directBotWatchdogTimer);
     this.directBotWatchdogTimer = null;
+  }
+
+  startOutcomeBotWatchdog() {
+    if (this.outcomeBotWatchdogTimer) return;
+    if (!this.config.binance.scannerEnabled) return;
+    if (!this.config.binance.directBotWatchdogEnabled) return;
+
+    const watchdogMs = Math.max(5000, Number(this.config.binance.directBotWatchdogMs || 15000));
+    this.outcomeBotWatchdogTimer = setInterval(() => {
+      this.recoverInactiveOutcomeBots().catch((error) => {
+        this.logger.warn('bot', 'Watchdog outcome bots lỗi', { error: error.message });
+      });
+    }, watchdogMs);
+  }
+
+  stopOutcomeBotWatchdog() {
+    if (!this.outcomeBotWatchdogTimer) return;
+    clearInterval(this.outcomeBotWatchdogTimer);
+    this.outcomeBotWatchdogTimer = null;
+  }
+
+  async recoverInactiveOutcomeBots() {
+    if (!this.config.binance.scannerEnabled) return;
+    this.outcomeBotLastWatchdogAt = Date.now();
+    this.initializeOutcomeBots();
+    const health = this.getOutcomeBotHealthSnapshot();
+    const recoverPerTick = Math.max(1, Number(this.config.binance.directBotRecoverPerTick || 2));
+    const targets = health.stalledBots.slice(0, recoverPerTick);
+    if (!targets.length) return;
+
+    for (const bot of targets) {
+      const symbol = String(bot.symbol || '').toUpperCase();
+      if (!symbol) continue;
+      for (const tf of this.getScannerTimeframes()) {
+        const candles = this.stateStore.getCandles(symbol, tf).filter((x) => x?.isClosed);
+        const lastClosed = candles[candles.length - 1];
+        if (!lastClosed) continue;
+        this.evaluateSignalOutcomesByCandle(symbol, tf, lastClosed);
+      }
+      this.outcomeBotRecoveryCount += 1;
+    }
   }
 
   startScannerWsHealthMonitor() {
@@ -2308,6 +2512,7 @@ class BotEngine {
       const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
       if (!forceAnalyze && lastClosed.time <= prevClose) continue;
       this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+      this.evaluateSignalOutcomesByCandle(symbol, tf, lastClosed);
       if (String(tf || '').toLowerCase() === '1m') {
         await this.evaluateSignalFollowTrack(symbol, null, lastClosed);
       } else {
@@ -2631,6 +2836,10 @@ class BotEngine {
 
     this.commitSignalBroadcast(payload, tf, candleTime);
     this.upsertSignalFollowTrack(payload, tf, candleTime);
+    this.registerSignalOutcomeTrackFromSignal(payload, tf, candleTime, {
+      source: payload.source || 'TOTAL_BRAIN',
+      isUpdate: Boolean(broadcastDecision.isUpdate),
+    });
     return { ok: true, tradeId, signal: payload, update: Boolean(broadcastDecision.isUpdate) };
   }
 
@@ -3024,6 +3233,7 @@ class BotEngine {
       const prevClose = this.multiScanLastCloseByKey.get(closeKey) || 0;
       if (lastClosed.time <= prevClose) continue;
       this.multiScanLastCloseByKey.set(closeKey, lastClosed.time);
+      this.evaluateSignalOutcomesByCandle(symbol, tf, lastClosed);
       if (String(tf || '').toLowerCase() === '1m') {
         await this.evaluateSignalFollowTrack(symbol, null, lastClosed);
       } else {
@@ -3450,6 +3660,7 @@ class BotEngine {
           });
         }
         if (candle.isClosed) {
+          this.evaluateSignalOutcomesByCandle(symbol, timeframe, candle);
           if (String(timeframe || '').toLowerCase() === '1m') {
             await this.evaluateSignalFollowTrack(symbol, null, candle);
           } else {
@@ -4089,6 +4300,8 @@ class BotEngine {
     const scannerSymbols = this.getScannerSymbols();
     const health = this.getDirectBotHealthSnapshot();
     const directBotList = health.bots;
+    const outcomeHealth = this.getOutcomeBotHealthSnapshot();
+    const outcomeBotList = outcomeHealth.bots;
     return {
       ...this.stateStore.getStatus(),
       profile: this.config.profile || 'BALANCED',
@@ -4142,6 +4355,21 @@ class BotEngine {
             scannerRestartCount: this.directBotRestartCount,
           },
           bots: directBotList,
+        },
+        outcomeBots: {
+          requestedCount: scannerSymbols.length,
+          runningCount: outcomeHealth.activeCount,
+          inactiveCount: outcomeHealth.inactiveCount,
+          stalledCount: outcomeHealth.stalledCount,
+          staleMs: outcomeHealth.staleMs,
+          watchdog: {
+            enabled: this.config.binance.directBotWatchdogEnabled,
+            watchdogMs: this.config.binance.directBotWatchdogMs,
+            recoverPerTick: this.config.binance.directBotRecoverPerTick,
+            lastRunAt: this.outcomeBotLastWatchdogAt || 0,
+            recoveryCount: this.outcomeBotRecoveryCount,
+          },
+          bots: outcomeBotList,
         },
         telegramBots: {
           primaryEnabled: this.config.telegram.enabled,

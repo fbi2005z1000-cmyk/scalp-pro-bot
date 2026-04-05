@@ -106,6 +106,18 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     res.json({ ok: true, data: statsService.getStats() });
   });
 
+  router.get('/signal-outcomes', (req, res) => {
+    const now = Date.now();
+    const hours = Math.max(1, Math.min(72, Number(req.query.hours || 24)));
+    const startTs = Number(req.query.startTs || now - hours * 60 * 60 * 1000);
+    const endTs = Number(req.query.endTs || now);
+    const data =
+      typeof botEngine.getSignalOutcomeReportRange === 'function'
+        ? botEngine.getSignalOutcomeReportRange(startTs, endTs)
+        : null;
+    res.json({ ok: true, data });
+  });
+
   router.get('/candles', async (req, res) => {
     const symbol = (req.query.symbol || stateStore.state.symbol).toUpperCase();
     const timeframe = req.query.timeframe || '1m';
