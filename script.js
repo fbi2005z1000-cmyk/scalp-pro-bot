@@ -106,6 +106,11 @@
     rsMeaningGrid: document.getElementById('rsMeaningGrid'),
     rsScenarioBox: document.getElementById('rsScenarioBox'),
     livePlanGrid: document.getElementById('livePlanGrid'),
+    autoTradeBadge: document.getElementById('autoTradeBadge'),
+    autoTradeSummary: document.getElementById('autoTradeSummary'),
+    autoTradeFilterGrid: document.getElementById('autoTradeFilterGrid'),
+    autoTradeDecisionGrid: document.getElementById('autoTradeDecisionGrid'),
+    autoTradeReason: document.getElementById('autoTradeReason'),
   };
 
   let stream = null;
@@ -317,6 +322,10 @@
     const h = Math.floor(m / 60);
     const rm = m % 60;
     return rm ? `${h}h ${rm}m` : `${h}h`;
+  }
+
+  function boolText(v) {
+    return v ? 'BẬT' : 'TẮT';
   }
 
   function timeframeToSec(tf) {
@@ -1613,6 +1622,148 @@
 
     drawSupportResistance(state.srData);
     renderRsGuidePanel();
+    if (state.status) {
+      renderAutoTrade(state.status, signal);
+    }
+  }
+
+  function renderAutoTrade(status, signalInput) {
+    if (
+      !el.autoTradeBadge ||
+      !el.autoTradeSummary ||
+      !el.autoTradeFilterGrid ||
+      !el.autoTradeDecisionGrid ||
+      !el.autoTradeReason
+    ) {
+      return;
+    }
+
+    const signal = signalInput || status?.lastSignal || {};
+    const market = signal?.market || {};
+    const diagnostics = signal?.diagnostics || {};
+    const pre = signal?.preSignal?.selected || null;
+    const mode = String(status?.mode || 'SIGNAL_ONLY');
+    const autoMode = mode === 'AUTO_BOT';
+    const riskLocked = status?.stateMachine === 'PAUSED_BY_RISK' || Boolean(status?.risk?.lockedByRisk);
+    const hasPosition = Boolean(status?.activePosition);
+    const cooldownActive = Boolean(status?.cooldownActive);
+    const conf = Number(signal?.confidence || 0);
+    const requiredScore = Number(signal?.requiredScore || diagnostics?.requiredScore || 0);
+    const scoreGateOk = requiredScore > 0 ? conf >= requiredScore : conf >= 75;
+    const autoReady =
+      autoMode &&
+      Boolean(status?.botRunning) &&
+      !riskLocked &&
+      !cooldownActive &&
+      !hasPosition &&
+      scoreGateOk &&
+      signal?.side &&
+      signal.side !== 'NO_TRADE';
+
+    if (autoReady) {
+      el.autoTradeBadge.className = 'badge long';
+      el.autoTradeBadge.textContent = 'AUTO SẴN SÀNG VÀO';
+    } else if (autoMode) {
+      el.autoTradeBadge.className = 'badge warn';
+      el.autoTradeBadge.textContent = 'AUTO ĐANG CHẶN';
+    } else {
+      el.autoTradeBadge.className = 'badge neutral';
+      el.autoTradeBadge.textContent = `Mode: ${mode}`;
+    }
+
+    const spreadPct = Number(market?.spreadPct ?? status?.orderBook?.spreadPct ?? 0);
+    const latencyMs = Number(status?.orderBook?.latencyMs || 0);
+    const rr = Number(signal?.rr || 0);
+    const scoreText = hasNum(conf) ? `${formatNum(conf, 0)}/100` : 'N/A';
+    const requiredText = hasNum(requiredScore) && requiredScore > 0 ? formatNum(requiredScore, 0) : 'N/A';
+
+    const summaryRows = [
+      ['Mode', mode, 'CONFIDENCE'],
+      ['Bot chạy', boolText(Boolean(status?.botRunning)), 'CONFIDENCE'],
+      ['Auto gate', autoMode ? 'BẬT' : 'TẮT', 'CONFIDENCE'],
+      ['Auto sẵn sàng', autoReady ? 'CÓ' : 'KHÔNG', 'CONFIDENCE'],
+      ['State machine', status?.stateMachine || 'N/A', 'SIDEWAY'],
+      ['Risk lock', riskLocked ? 'CÓ' : 'KHÔNG', 'SIDEWAY'],
+      ['Cooldown', cooldownActive ? 'ĐANG BẬT' : 'KHÔNG', 'SIDEWAY'],
+      ['Vị thế mở', hasPosition ? 'CÓ' : 'KHÔNG', 'ENTRY'],
+      ['Confidence', scoreText, 'CONFIDENCE'],
+      ['Ngưỡng yêu cầu', requiredText, 'CONFIDENCE'],
+      ['RR', hasNum(rr) ? formatNum(rr, 2) : 'N/A', 'RR'],
+      [
+        'Spread / Latency',
+        `${hasNum(spreadPct) ? formatNum(spreadPct * 100, 3) : 'N/A'}% / ${hasNum(latencyMs) ? `${formatNum(latencyMs, 0)}ms` : 'N/A'}`,
+        'VOLUME',
+      ],
+    ];
+
+    el.autoTradeSummary.innerHTML = summaryRows
+      .map(
+        ([k, v, tipKey]) =>
+          `<div class="item"><div class="k">${k}${tipIcon(tipKey)}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
+      )
+      .join('');
+
+    const atrPct = Number(market?.atrPct2m || 0);
+    const distMa25 = Number(market?.distanceToMA25 || 0);
+    const marketQualityScore = Number(market?.marketQuality?.score || 0);
+    const rejectCodes = Array.isArray(signal?.rejectCodes)
+      ? signal.rejectCodes.filter(Boolean)
+      : Array.isArray(diagnostics?.rejectCodes)
+      ? diagnostics.rejectCodes.filter(Boolean)
+      : [];
+
+    const filterRows = [
+      ['Trend 5m', signal?.trend5m || market?.trend || 'N/A', 'SIDEWAY'],
+      ['Trend 15m', signal?.trend15m || market?.trend15m || 'N/A', 'SIDEWAY'],
+      ['Market regime', signal?.marketRegime || market?.marketRegime || 'N/A', 'VOLUME'],
+      ['Sideway', market?.sideway ? 'CÓ' : 'KHÔNG', 'SIDEWAY'],
+      ['ATR%', hasNum(atrPct) && atrPct > 0 ? `${formatNum(atrPct * 100, 3)}%` : 'N/A', 'VOLUME'],
+      ['Distance MA25', hasNum(distMa25) && distMa25 > 0 ? `${formatNum(distMa25 * 100, 3)}%` : 'N/A', 'MA'],
+      ['Reward->R', hasNum(signal?.rewardToResistancePct) ? `${formatNum(signal.rewardToResistancePct * 100, 3)}%` : 'N/A', 'RR'],
+      ['Reward->S', hasNum(signal?.rewardToSupportPct) ? `${formatNum(signal.rewardToSupportPct * 100, 3)}%` : 'N/A', 'RR'],
+      ['Market quality', hasNum(marketQualityScore) && marketQualityScore > 0 ? formatNum(marketQualityScore, 0) : 'N/A', 'CONFIDENCE'],
+      ['Reject codes', rejectCodes.length ? rejectCodes.slice(0, 3).join(', ') : 'N/A', 'SIDEWAY'],
+    ];
+
+    el.autoTradeFilterGrid.innerHTML = filterRows
+      .map(
+        ([k, v, tipKey]) =>
+          `<div class="item"><div class="k">${k}${tipIcon(tipKey)}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
+      )
+      .join('');
+
+    const decisionRows = [
+      ['Kèo hiện tại', signal?.side || 'NO_TRADE', 'ENTRY'],
+      ['Level', signal?.level || 'N/A', 'CONFIDENCE'],
+      ['Entry', hasNum(signal?.entryPrice) ? formatPrice(signal.entryPrice) : 'N/A', 'ENTRY'],
+      ['SL', hasNum(signal?.stopLoss) ? formatPrice(signal.stopLoss) : 'N/A', 'SL'],
+      ['TP1', hasNum(signal?.tp1) ? formatPrice(signal.tp1) : 'N/A', 'TP'],
+      ['Đòn bẩy đề xuất', hasNum(signal?.leverage) ? `x${formatNum(signal.leverage, 0)}` : 'N/A', 'CONFIDENCE'],
+      ['Pre-signal', pre ? `${pre.side} ${pre.mode || 'WATCH'}` : 'N/A', 'CONFIDENCE'],
+      ['Giá kích hoạt', pre && hasNum(pre.triggerPrice) ? formatPrice(pre.triggerPrice) : 'N/A', 'ENTRY'],
+      ['ETA kích hoạt', pre && hasNum(pre.etaSec) ? formatEtaSec(pre.etaSec) : 'N/A', 'ENTRY'],
+      ['Cập nhật', hasNum(signal?.createdAt) ? formatByTimezone(new Date(signal.createdAt), false) : 'N/A', 'CONFIDENCE'],
+    ];
+
+    el.autoTradeDecisionGrid.innerHTML = decisionRows
+      .map(
+        ([k, v, tipKey]) =>
+          `<div class="item"><div class="k">${k}${tipIcon(tipKey)}</div><div class="v ${valueClassByText(v)}">${v}</div></div>`,
+      )
+      .join('');
+
+    const baseReasons = Array.isArray(signal?.reasons) ? signal.reasons.slice(0, 4) : [];
+    const baseRejects = Array.isArray(signal?.rejects) ? signal.rejects.slice(0, 4) : [];
+    const baseDiagnostics = Array.isArray(diagnostics?.rejects) ? diagnostics.rejects.slice(0, 4) : [];
+    const explain = [];
+    if (autoReady) explain.push('AUTO pass toàn bộ gate cơ bản, có thể vào lệnh khi tín hiệu giữ ổn định.');
+    else if (!autoMode) explain.push('Đang không ở AUTO_BOT, bot chỉ phân tích/gợi ý.');
+    else explain.push('AUTO đang bị chặn bởi một hoặc nhiều điều kiện risk/filter.');
+    if (baseReasons.length) explain.push(`Lý do thuận: ${baseReasons.join(' | ')}`);
+    if (baseRejects.length) explain.push(`Lý do chặn: ${baseRejects.join(' | ')}`);
+    else if (baseDiagnostics.length) explain.push(`Chẩn đoán: ${baseDiagnostics.join(' | ')}`);
+    if (rejectCodes.length) explain.push(`Reject code: ${rejectCodes.join(', ')}`);
+    el.autoTradeReason.innerHTML = `<strong>Auto Explain:</strong><br>${explain.map((x) => `- ${x}`).join('<br>')}`;
   }
 
   function renderStatus(status) {
@@ -1663,6 +1814,7 @@
     updateCandleCountdown();
     el.chartFootNote.textContent = `${cooldownText} | Nến còn: ${state.candleCountdownText} | ${pos} | ${priceText} | ${indicatorText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
     renderRsGuidePanel();
+    renderAutoTrade(status, state.signal || status.lastSignal || null);
     renderFleet(status);
   }
 

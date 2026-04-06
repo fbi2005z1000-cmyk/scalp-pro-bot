@@ -288,6 +288,7 @@ button:hover {
 .signal-panel,
 .pressure-panel,
 .control-panel,
+.auto-panel,
 .stats-panel,
 .fleet-panel,
 .glossary-panel,
@@ -295,6 +296,7 @@ button:hover {
   grid-column: span 4;
 }
 
+.auto-panel,
 .stats-panel,
 .fleet-panel,
 .log-panel {
@@ -875,6 +877,32 @@ button:hover {
   padding: 8px;
 }
 
+.auto-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.auto-summary-grid .item {
+  border: 1px solid rgba(132, 160, 190, 0.26);
+  background: rgba(17, 27, 38, 0.7);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.auto-columns {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auto-col h3 {
+  margin: 0 0 8px 0;
+  font-size: 0.9rem;
+  color: #c8d9ea;
+}
+
 .fleet-subhead {
   margin-top: 14px;
 }
@@ -980,6 +1008,7 @@ button:hover {
   .signal-panel,
   .pressure-panel,
   .control-panel,
+  .auto-panel,
   .stats-panel,
   .fleet-panel,
   .glossary-panel,
@@ -1001,6 +1030,8 @@ button:hover {
     grid-template-columns: 1fr;
   }
 
+  .auto-summary-grid,
+  .auto-columns,
   .fleet-summary-grid,
   .fleet-columns {
     grid-template-columns: 1fr;
