@@ -279,14 +279,21 @@
     return Number(n).toFixed(digits);
   }
 
-  function formatPrice(n) {
+  function formatPriceAdaptive(n) {
     const v = Number(n);
     if (!Number.isFinite(v)) return 'N/A';
     const abs = Math.abs(v);
     if (abs >= 1000) return v.toFixed(2);
     if (abs >= 100) return v.toFixed(3);
     if (abs >= 1) return v.toFixed(4);
-    return v.toFixed(5);
+    if (abs >= 0.1) return v.toFixed(5);
+    if (abs >= 0.01) return v.toFixed(6);
+    if (abs >= 0.001) return v.toFixed(7);
+    return v.toFixed(8);
+  }
+
+  function formatPrice(n) {
+    return formatPriceAdaptive(n);
   }
 
   function formatEtaSec(sec) {
@@ -411,7 +418,7 @@
     const resistances = Array.isArray(sr.resistances) ? sr.resistances : [];
     const priceNow = getCurrentMarketPrice();
 
-    el.rsGuidePriceNow.textContent = `Giá hiện tại: ${priceNow > 0 ? formatNum(priceNow, 2) : 'N/A'}`;
+    el.rsGuidePriceNow.textContent = `Giá hiện tại: ${priceNow > 0 ? formatPrice(priceNow) : 'N/A'}`;
 
     const r1 = getZoneByLabel(resistances, 'R1', 0);
     const r2 = getZoneByLabel(resistances, 'R2', 1);
@@ -465,7 +472,7 @@
         const strength = item.zone?.strength || 'N/A';
         return `<div class="rs-card ${item.cls}">
           <div class="k">${item.title}</div>
-          <div class="v">${Number.isFinite(Number(price)) ? formatNum(price, 2) : 'N/A'}${
+          <div class="v">${Number.isFinite(Number(price)) ? formatPrice(price) : 'N/A'}${
             Number.isFinite(Number(price)) ? ` <small>(${strength})</small>` : ''
           }</div>
           <div class="note">${item.note}</div>
@@ -507,9 +514,9 @@
       (signal.side === 'LONG' || signal.side === 'SHORT') ? signal.side : hint?.side || 'NO_TRADE';
     const entryText =
       hasNum(signal.entryMin) && hasNum(signal.entryMax)
-        ? `${formatNum(signal.entryMin, 2)} - ${formatNum(signal.entryMax, 2)}`
+        ? `${formatPrice(signal.entryMin)} - ${formatPrice(signal.entryMax)}`
         : hasNum(hint?.price)
-        ? formatNum(hint.price, 2)
+        ? formatPrice(hint.price)
         : 'N/A';
     const sl = hasNum(signal.stopLoss) ? signal.stopLoss : hint?.stopLoss;
     const tp1 = hasNum(signal.tp1) ? signal.tp1 : hint?.tp1;
@@ -522,10 +529,10 @@
     const liveCards = [
       { k: 'Lệnh hiện tại', v: side, cls: valueClassByText(side) || 'neutral' },
       { k: 'Entry đề xuất', v: entryText, cls: 'neutral' },
-      { k: 'SL đề xuất', v: formatNum(sl, 2), cls: 'short' },
-      { k: 'TP1', v: formatNum(tp1, 2), cls: 'long' },
-      { k: 'TP2', v: formatNum(tp2, 2), cls: 'long' },
-      { k: 'TP3', v: formatNum(tp3, 2), cls: 'long' },
+      { k: 'SL đề xuất', v: formatPrice(sl), cls: 'short' },
+      { k: 'TP1', v: formatPrice(tp1), cls: 'long' },
+      { k: 'TP2', v: formatPrice(tp2), cls: 'long' },
+      { k: 'TP3', v: formatPrice(tp3), cls: 'long' },
       { k: 'Đòn bẩy', v: leverage === 'N/A' ? 'N/A' : `x${leverage}`, cls: 'neutral' },
       { k: 'Confidence / RR', v: `${conf} | RR ${rr}`, cls: 'neutral' },
     ];
@@ -1085,7 +1092,7 @@
 
     const label = document.createElement('span');
     label.className = 'sr-signal-line-label';
-    label.textContent = `${side} Trigger (Điểm bắt lệnh) ${formatNum(price, 2)} | ${potentialZone.mode || 'WATCH'} ${formatNum(
+    label.textContent = `${side} Trigger (Điểm bắt lệnh) ${formatPrice(price)} | ${potentialZone.mode || 'WATCH'} ${formatNum(
       potentialZone.score,
       0,
     )}`;
@@ -1204,10 +1211,9 @@
     label.className = 'entry-hint-label';
     const probText = Number.isFinite(Number(hint.probability)) ? ` | XS ${formatNum(hint.probability, 0)}%` : '';
     const etaText = Number.isFinite(Number(hint.etaSec)) ? ` | ETA ${formatEtaSec(hint.etaSec)}` : '';
-    label.textContent = `Gợi ý bắt lệnh realtime: ${hint.side} @ ${formatNum(hint.price, 2)} (${hint.mode})${probText}${etaText} | SL ${formatNum(
+    label.textContent = `Gợi ý bắt lệnh realtime: ${hint.side} @ ${formatPrice(hint.price)} (${hint.mode})${probText}${etaText} | SL ${formatPrice(
       hint.stopLoss,
-      2,
-    )} | TP1 ${formatNum(hint.tp1, 2)}`;
+    )} | TP1 ${formatPrice(hint.tp1)}`;
     lineEl.appendChild(label);
 
     srZoneOverlay.appendChild(lineEl);
@@ -1228,7 +1234,7 @@
 
     const label = document.createElement('span');
     label.className = 'entry-hint-sub-label';
-    label.textContent = `${text}: ${formatNum(price, 2)}`;
+    label.textContent = `${text}: ${formatPrice(price)}`;
     lineEl.appendChild(label);
 
     srZoneOverlay.appendChild(lineEl);
@@ -1460,7 +1466,9 @@
 
     const entryText =
       hasNum(signal.entryMin) && hasNum(signal.entryMax)
-        ? `${formatNum(signal.entryMin)} - ${formatNum(signal.entryMax)}`
+        ? `${formatPrice(signal.entryMin)} - ${formatPrice(signal.entryMax)}`
+        : hasNum(state.entryHint?.price)
+        ? formatPrice(state.entryHint.price)
         : 'Chưa có vùng vào';
 
     const supportNear = sr.keyLevels?.support;
@@ -1476,7 +1484,7 @@
     const preSignalText = pre
       ? `${pre.side} ${pre.mode || 'WATCH'} (${formatNum(pre.probability, 0)}%)`
       : 'N/A';
-    const preTriggerText = pre ? formatNum(pre.triggerPrice, 2) : 'N/A';
+    const preTriggerText = pre ? formatPrice(pre.triggerPrice) : 'N/A';
     const preEtaText = pre ? formatEtaSec(pre.etaSec) : 'N/A';
     const planStopLoss = hasNum(signal.stopLoss) ? signal.stopLoss : state.entryHint?.stopLoss;
     const planTp1 = hasNum(signal.tp1) ? signal.tp1 : state.entryHint?.tp1;
@@ -1490,10 +1498,10 @@
       ['Regime', signal.volatilityRegime || market.volatilityRegime || 'N/A', 'VOLUME'],
       ['Session', signal.session || market.session || 'N/A', 'VOLUME'],
       ['Entry', entryText, 'ENTRY'],
-      ['SL', formatNum(planStopLoss), 'SL'],
-      ['TP1', formatNum(planTp1), 'TP'],
-      ['TP2', formatNum(planTp2), 'TP'],
-      ['TP3', formatNum(planTp3), 'TP'],
+      ['SL', formatPrice(planStopLoss), 'SL'],
+      ['TP1', formatPrice(planTp1), 'TP'],
+      ['TP2', formatPrice(planTp2), 'TP'],
+      ['TP3', formatPrice(planTp3), 'TP'],
       ['RR', formatNum(signal.rr), 'RR'],
       [
         `ATR % (${analysisTf})`,
@@ -1503,21 +1511,21 @@
         'VOLUME',
       ],
       [`RSI14 (${analysisTf})`, formatNum(hasNum(market.rsi2m) ? market.rsi2m : localIndicators.rsi), 'RSI'],
-      [`MA7 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma7) ? market.ma2m?.ma7 : localIndicators.ma7), 'MA'],
-      [`MA25 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma25) ? market.ma2m?.ma25 : localIndicators.ma25), 'MA'],
-      [`MA99 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma99) ? market.ma2m?.ma99 : localIndicators.ma99), 'MA'],
-      [`MA200 (${analysisTf})`, formatNum(hasNum(market.ma2m?.ma200) ? market.ma2m?.ma200 : localIndicators.ma200), 'MA'],
+      [`MA7 (${analysisTf})`, formatPrice(hasNum(market.ma2m?.ma7) ? market.ma2m?.ma7 : localIndicators.ma7), 'MA'],
+      [`MA25 (${analysisTf})`, formatPrice(hasNum(market.ma2m?.ma25) ? market.ma2m?.ma25 : localIndicators.ma25), 'MA'],
+      [`MA99 (${analysisTf})`, formatPrice(hasNum(market.ma2m?.ma99) ? market.ma2m?.ma99 : localIndicators.ma99), 'MA'],
+      [`MA200 (${analysisTf})`, formatPrice(hasNum(market.ma2m?.ma200) ? market.ma2m?.ma200 : localIndicators.ma200), 'MA'],
       ['PA Structure', pa.structure || 'N/A', 'SIDEWAY'],
       ['PA Pullback', pa.pullbackQuality || 'N/A', 'ENTRY'],
       ['PA Candle Confirm', pa.candleConfirm ? 'Có' : 'Không', 'ENTRY'],
-      ['Support gần (Hỗ trợ)', formatNum(supportNear), 'SIDEWAY'],
-      ['Resistance gần (Kháng cự)', formatNum(resistanceNear), 'SIDEWAY'],
+      ['Support gần (Hỗ trợ)', formatPrice(supportNear), 'SIDEWAY'],
+      ['Resistance gần (Kháng cự)', formatPrice(resistanceNear), 'SIDEWAY'],
       ['Long Zone', longZoneText, 'ENTRY'],
       ['Short Zone', shortZoneText, 'ENTRY'],
       ['Dự báo sớm', preSignalText, 'CONFIDENCE'],
       ['Giá kích hoạt sớm', preTriggerText, 'ENTRY'],
       ['ETA kích hoạt', preEtaText, 'ENTRY'],
-      ['Gợi ý bắt lệnh', state.entryHint ? `${state.entryHint.side} @ ${formatNum(state.entryHint.price, 2)}` : 'N/A', 'ENTRY'],
+      ['Gợi ý bắt lệnh', state.entryHint ? `${state.entryHint.side} @ ${formatPrice(state.entryHint.price)}` : 'N/A', 'ENTRY'],
       ['Volume', volumeStatus, 'VOLUME'],
       ['Reject code', signal.rejectCode || signal.rejectCodes?.[0] || 'N/A', 'SIDEWAY'],
     ];
@@ -1589,7 +1597,7 @@
     if (pa.side === 'NONE') warnings.push('Price Action chưa xác nhận entry đẹp, tránh FOMO.');
     if (pre?.mode === 'ARMED') {
       warnings.unshift(
-        `Pre-signal đang ARMED: ${pre.side} tại ${formatNum(pre.triggerPrice, 2)} (XS ${formatNum(
+        `Pre-signal đang ARMED: ${pre.side} tại ${formatPrice(pre.triggerPrice)} (XS ${formatNum(
           pre.probability,
           0,
         )}%)`,
@@ -1639,13 +1647,13 @@
       : 'Không cooldown';
 
     const pos = status.activePosition
-      ? `Vị thế: ${status.activePosition.side} @ ${formatNum(status.activePosition.entryPrice)}`
+      ? `Vị thế: ${status.activePosition.side} @ ${formatPrice(status.activePosition.entryPrice)}`
       : 'Không có vị thế mở';
 
     const refPrice = getCurrentDisplayPrice();
     const priceText = refPrice ? `Giá(${state.priceSource}): ${formatPrice(refPrice)}` : `Giá(${state.priceSource}): N/A`;
     const i = getLatestIndicatorSnapshot();
-    const indicatorText = `RSI14: ${formatNum(i.rsi, 2)} | MA7: ${formatNum(i.ma7, 2)} | MA25: ${formatNum(i.ma25, 2)} | MA99: ${formatNum(i.ma99, 2)} | MA200: ${formatNum(i.ma200, 2)}`;
+    const indicatorText = `RSI14: ${formatNum(i.rsi, 2)} | MA7: ${formatPrice(i.ma7)} | MA25: ${formatPrice(i.ma25)} | MA99: ${formatPrice(i.ma99)} | MA200: ${formatPrice(i.ma200)}`;
     const tzText = `TZ: ${state.timezoneMode === 'VN' ? 'UTC+7' : state.timezoneMode}`;
     const marketSource = status.binance?.useTestnet ? 'FUTURES TESTNET' : 'FUTURES MAINNET';
 
