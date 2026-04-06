@@ -242,13 +242,30 @@ class BotEngine {
     for (const c of candles) {
       const t = Number(c?.time);
       if (!Number.isFinite(t)) continue;
+      const open = Number(c?.open);
+      const high = Number(c?.high);
+      const low = Number(c?.low);
+      const close = Number(c?.close);
+      if (
+        !Number.isFinite(open) ||
+        !Number.isFinite(high) ||
+        !Number.isFinite(low) ||
+        !Number.isFinite(close)
+      ) {
+        continue;
+      }
       byTime.set(t, {
         time: t,
-        open: Number(c.open),
-        high: Number(c.high),
-        low: Number(c.low),
-        close: Number(c.close),
-        volume: Number(c.volume || 0),
+        open,
+        high,
+        low,
+        close,
+        volume: Number(c?.volume || 0),
+        quoteVolume: Number(c?.quoteVolume || c?.q || 0),
+        tradeCount: Number(c?.tradeCount || c?.n || 0),
+        takerBuyBaseVolume: Number(c?.takerBuyBaseVolume || c?.V || 0),
+        takerBuyQuoteVolume: Number(c?.takerBuyQuoteVolume || c?.Q || 0),
+        closeTime: Number(c?.closeTime || 0),
         isClosed: Boolean(c.isClosed),
       });
     }

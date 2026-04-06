@@ -101,6 +101,10 @@ const aggregateCandles = (candles, factor, options = {}) => {
         low: c.low,
         close: c.close,
         volume: c.volume || 0,
+        quoteVolume: c.quoteVolume || 0,
+        tradeCount: c.tradeCount || 0,
+        takerBuyBaseVolume: c.takerBuyBaseVolume || 0,
+        takerBuyQuoteVolume: c.takerBuyQuoteVolume || 0,
         closeTime: c.closeTime,
         _count: 1,
         _isAllClosed: Boolean(c.isClosed),
@@ -110,6 +114,10 @@ const aggregateCandles = (candles, factor, options = {}) => {
       existing.low = Math.min(existing.low, c.low);
       existing.close = c.close;
       existing.volume += c.volume || 0;
+      existing.quoteVolume += c.quoteVolume || 0;
+      existing.tradeCount += c.tradeCount || 0;
+      existing.takerBuyBaseVolume += c.takerBuyBaseVolume || 0;
+      existing.takerBuyQuoteVolume += c.takerBuyQuoteVolume || 0;
       existing.closeTime = c.closeTime;
       existing._count += 1;
       existing._isAllClosed = existing._isAllClosed && Boolean(c.isClosed);
@@ -126,6 +134,10 @@ const aggregateCandles = (candles, factor, options = {}) => {
       low: c.low,
       close: c.close,
       volume: c.volume,
+      quoteVolume: c.quoteVolume,
+      tradeCount: c.tradeCount,
+      takerBuyBaseVolume: c.takerBuyBaseVolume,
+      takerBuyQuoteVolume: c.takerBuyQuoteVolume,
       closeTime: c.closeTime,
       isClosed: c._count >= factor && c._isAllClosed,
     }));

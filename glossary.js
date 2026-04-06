@@ -85,6 +85,41 @@
     detail:
       'LOW_VOL: biến động thấp, HIGH_VOL: biến động cao, NORMAL_VOL: phù hợp scalp. Bot dùng regime để tăng hoặc giảm độ khó vào lệnh.',
   },
+  STOCH_RSI: {
+    short: 'Stochastic RSI đo nhịp quá mua/quá bán nhanh hơn RSI thường.',
+    detail:
+      'Stoch RSI giúp bắt nhịp đảo chiều ngắn hạn. Bot dùng để xác nhận động lượng vào lệnh, đặc biệt ở nhóm coin thanh khoản cao.',
+  },
+  CCI: {
+    short: 'CCI đo độ lệch giá so với trung bình.',
+    detail:
+      'CCI cao/thấp cho biết giá đang lệch mạnh khỏi vùng cân bằng. Bot dùng CCI để lọc pullback đẹp hay đuổi giá.',
+  },
+  WILLIAMS_R: {
+    short: 'Williams %R đo vị trí giá trong biên dao động gần nhất.',
+    detail:
+      'Giá trị gần 0 là vùng cao, gần -100 là vùng thấp. Bot dùng để tránh vào lệnh khi giá đã quá cực đoan.',
+  },
+  ROC: {
+    short: 'ROC (Rate of Change) đo tốc độ thay đổi giá theo phần trăm.',
+    detail:
+      'ROC dương mạnh cho thấy đà tăng, ROC âm mạnh cho thấy đà giảm. Bot dùng ROC để xác nhận momentum theo hướng tín hiệu.',
+  },
+  VWAP: {
+    short: 'VWAP là giá trung bình theo khối lượng.',
+    detail:
+      'VWAP cho biết giá đang giao dịch cao hay thấp hơn mức cân bằng có trọng số volume. Bot dùng VWAP để lọc bẫy breakout.',
+  },
+  MFI: {
+    short: 'MFI là RSI có thêm yếu tố volume.',
+    detail:
+      'MFI giúp đánh giá dòng tiền vào/ra. Bot dùng để tránh vào lệnh khi dòng tiền đang quá cực đoan.',
+  },
+  CMF: {
+    short: 'CMF đo áp lực dòng tiền tích lũy/phân phối.',
+    detail:
+      'CMF dương thường nghiêng mua, CMF âm thường nghiêng bán. Bot dùng mạnh cho coin thanh khoản thấp để lọc tín hiệu giả.',
+  },
 };
 
 module.exports = glossary;

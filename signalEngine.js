@@ -43,6 +43,139 @@ class SignalEngine {
     return hardCodes.has(code);
   }
 
+  getSymbolLiquidityProfile(symbol) {
+    const normalized = String(symbol || '').toUpperCase();
+    const highLiq = new Set(this.config.positionSizing?.highLiqSymbols || []);
+    const scp = new Set(this.config.positionSizing?.scpSymbols || []);
+    if (highLiq.has(normalized)) return 'HIGH_LIQ';
+    if (scp.has(normalized)) return 'LOW_LIQ';
+    return 'STANDARD';
+  }
+
+  applyLiquidityIndicatorFilter({
+    side,
+    symbolProfile,
+    latest2,
+    ind2m,
+    breakdown,
+    reasons,
+    risks,
+    rejects,
+    rejectCodes,
+  }) {
+    let profileScore = 0;
+    const stochRsiK = Number(ind2m?.latest?.stochRsiK);
+    const stochRsiD = Number(ind2m?.latest?.stochRsiD);
+    const cci20 = Number(ind2m?.latest?.cci20);
+    const williamsR14 = Number(ind2m?.latest?.williamsR14);
+    const roc9 = Number(ind2m?.latest?.roc9);
+    const vwap = Number(ind2m?.latest?.vwap);
+    const mfi14 = Number(ind2m?.latest?.mfi14);
+    const cmf20 = Number(ind2m?.latest?.cmf20);
+    const close = Number(latest2?.close || 0);
+
+    const isLong = side === 'LONG';
+    const sideOk = (longCond, shortCond) => (isLong ? longCond : shortCond);
+
+    if (symbolProfile === 'HIGH_LIQ') {
+      if (
+        Number.isFinite(stochRsiK) &&
+        Number.isFinite(stochRsiD) &&
+        sideOk(stochRsiK >= stochRsiD, stochRsiK <= stochRsiD)
+      ) {
+        breakdown.maMomentum += 6;
+        profileScore += 3;
+        reasons.push('Stoch RSI xác nhận động lượng theo hướng vào lệnh');
+      } else if (Number.isFinite(stochRsiK) && Number.isFinite(stochRsiD)) {
+        breakdown.maMomentum -= 6;
+        profileScore -= 3;
+        this.addReject(
+          rejects,
+          rejectCodes,
+          'STOCH_RSI_CONFLICT',
+          'Stoch RSI chưa đồng thuận cho nhóm thanh khoản cao',
+        );
+      }
+
+      if (Number.isFinite(roc9) && sideOk(roc9 > 0, roc9 < 0)) {
+        breakdown.maMomentum += 5;
+        profileScore += 3;
+        reasons.push('ROC ủng hộ gia tốc giá');
+      } else if (Number.isFinite(roc9)) {
+        breakdown.noisePenalty -= 5;
+        profileScore -= 2;
+        this.addReject(rejects, rejectCodes, 'ROC_CONFLICT', 'ROC chưa ủng hộ hướng lệnh');
+      }
+
+      if (Number.isFinite(vwap) && Number.isFinite(close) && close > 0) {
+        const aboveVwap = close >= vwap * 0.999;
+        const belowVwap = close <= vwap * 1.001;
+        if (sideOk(aboveVwap, belowVwap)) {
+          breakdown.volume += 4;
+          profileScore += 2;
+          reasons.push('Giá đang thuận với VWAP');
+        } else {
+          breakdown.noisePenalty -= 4;
+          profileScore -= 1;
+          risks.push('Giá lệch VWAP, khả năng trap tăng');
+        }
+      }
+
+      if (Number.isFinite(mfi14)) {
+        if (mfi14 >= 25 && mfi14 <= 82) {
+          breakdown.volume += 3;
+          profileScore += 1;
+        } else {
+          breakdown.noisePenalty -= 3;
+          profileScore -= 1;
+          this.addReject(rejects, rejectCodes, 'MFI_EXTREME', 'MFI vào vùng cực đoan, rủi ro đảo chiều');
+        }
+      }
+      breakdown.liquidityProfile += profileScore;
+      return;
+    }
+
+    if (symbolProfile === 'LOW_LIQ') {
+      if (Number.isFinite(cmf20) && sideOk(cmf20 >= 0.02, cmf20 <= -0.02)) {
+        breakdown.pressure += 8;
+        profileScore += 4;
+        reasons.push('CMF xác nhận dòng tiền thật cho nhóm thanh khoản thấp');
+      } else if (Number.isFinite(cmf20)) {
+        breakdown.pressure -= 6;
+        profileScore -= 3;
+        this.addReject(rejects, rejectCodes, 'CMF_WEAK', 'CMF yếu, nguy cơ fake move cao');
+      }
+
+      if (Number.isFinite(cci20) && sideOk(cci20 >= -20, cci20 <= 20)) {
+        breakdown.structure += 4;
+        profileScore += 2;
+        reasons.push('CCI ủng hộ nhịp pullback đúng hướng');
+      } else if (Number.isFinite(cci20)) {
+        breakdown.noisePenalty -= 4;
+        profileScore -= 1;
+        risks.push('CCI lệch hướng, cần nến xác nhận mạnh hơn');
+      }
+
+      if (Number.isFinite(williamsR14) && sideOk(williamsR14 >= -85, williamsR14 <= -15)) {
+        breakdown.rsi += 4;
+        profileScore += 1;
+      } else if (Number.isFinite(williamsR14)) {
+        breakdown.noisePenalty -= 3;
+        profileScore -= 1;
+      }
+
+      if (Number.isFinite(mfi14) && mfi14 >= 18 && mfi14 <= 86) {
+        breakdown.volume += 3;
+        profileScore += 1;
+      } else if (Number.isFinite(mfi14)) {
+        breakdown.noisePenalty -= 3;
+        profileScore -= 1;
+        this.addReject(rejects, rejectCodes, 'MFI_EXTREME', 'MFI quá cực đoan ở coin thanh khoản thấp');
+      }
+      breakdown.liquidityProfile += profileScore;
+    }
+  }
+
   estimateEtaSec(currentPrice, triggerPrice, priceSpeedPerMin) {
     if (!Number.isFinite(currentPrice) || !Number.isFinite(triggerPrice) || currentPrice <= 0) return null;
     const distancePct = Math.abs((triggerPrice - currentPrice) / currentPrice);
@@ -490,6 +623,7 @@ class SignalEngine {
       spreadPct,
       marketQuality,
     });
+    const symbolProfile = this.getSymbolLiquidityProfile(symbol);
 
     const marketContext = {
       trend: trendResult.trend,
@@ -529,6 +663,17 @@ class SignalEngine {
       marketQuality,
       lastPrice: latest2.close,
       analysisTimeframe: analysisTf,
+      symbolProfile,
+      indicatorSnapshot: {
+        stochRsiK: ind2m.latest.stochRsiK,
+        stochRsiD: ind2m.latest.stochRsiD,
+        cci20: ind2m.latest.cci20,
+        williamsR14: ind2m.latest.williamsR14,
+        roc9: ind2m.latest.roc9,
+        vwap: ind2m.latest.vwap,
+        mfi14: ind2m.latest.mfi14,
+        cmf20: ind2m.latest.cmf20,
+      },
     };
 
     if (trendResult.trend === 'SIDEWAY' || sidewayResult.sideway) {
@@ -584,6 +729,7 @@ class SignalEngine {
       supportResistance,
       priceAction,
       marketQuality,
+      symbolProfile,
     };
 
     const longEval = this.evaluateLong(sharedInput);
@@ -698,6 +844,7 @@ class SignalEngine {
       leverage: recommendedLeverage,
       takerFeePct: this.config.trading.takerFeePct,
       makerFeePct: this.config.trading.makerFeePct,
+      symbolProfile,
       confidenceBreakdown: breakdown,
       requiredScore,
       trend5m: trendResult.trend,
@@ -726,6 +873,7 @@ class SignalEngine {
       risks: selected.risks,
       rejects: selected.rejects,
       rejectCodes: selected.rejectCodes,
+      indicatorSnapshot: marketContext.indicatorSnapshot,
       market: marketContext,
       priceAction,
       diagnostics: {
@@ -939,10 +1087,13 @@ class SignalEngine {
         session: 0,
         riskPenalty: 0,
         noisePenalty: 0,
+        liquidityProfile: 0,
         finalScore: 0,
       },
       trend5m: (extra.market && extra.market.trend) || 'UNKNOWN',
       trend15m: (extra.market && extra.market.trend15m) || 'UNKNOWN',
+      symbolProfile:
+        (extra.market && extra.market.symbolProfile) || this.getSymbolLiquidityProfile(symbol),
       reasons: [reason],
       risks: [],
       rejects: extra.diagnostics?.rejects || [],
@@ -972,6 +1123,7 @@ class SignalEngine {
       session: 0,
       riskPenalty: 0,
       noisePenalty: 0,
+      liquidityProfile: 0,
     };
   }
 
@@ -1144,6 +1296,7 @@ class SignalEngine {
       supportResistance,
       priceAction,
       marketQuality,
+      symbolProfile,
     } = params;
 
     const reasons = [];
@@ -1538,6 +1691,18 @@ class SignalEngine {
       hardRejectSet.add('LOW_REWARD_DISTANCE');
     }
 
+    this.applyLiquidityIndicatorFilter({
+      side: 'LONG',
+      symbolProfile,
+      latest2,
+      ind2m,
+      breakdown,
+      reasons,
+      risks,
+      rejects,
+      rejectCodes,
+    });
+
     const score = clamp(Object.values(breakdown).reduce((sum, v) => sum + v, 0), 0, 100);
     const uniqueRejectCodes = [...new Set(rejectCodes)];
 
@@ -1608,6 +1773,7 @@ class SignalEngine {
       supportResistance,
       priceAction,
       marketQuality,
+      symbolProfile,
     } = params;
 
     const reasons = [];
@@ -2001,6 +2167,18 @@ class SignalEngine {
       );
       hardRejectSet.add('LOW_REWARD_DISTANCE');
     }
+
+    this.applyLiquidityIndicatorFilter({
+      side: 'SHORT',
+      symbolProfile,
+      latest2,
+      ind2m,
+      breakdown,
+      reasons,
+      risks,
+      rejects,
+      rejectCodes,
+    });
 
     const score = clamp(Object.values(breakdown).reduce((sum, v) => sum + v, 0), 0, 100);
     const uniqueRejectCodes = [...new Set(rejectCodes)];

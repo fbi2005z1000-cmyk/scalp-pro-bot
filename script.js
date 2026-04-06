@@ -16,6 +16,7 @@
       ma: true,
       rsi: true,
       volume: true,
+      candleLiquidity: true,
       markers: true,
       zones: true,
       newbie: true,
@@ -43,6 +44,7 @@
     directKlineToken: 0,
     directKlineConnected: false,
     directReconcileTimer: null,
+    lastLiquidityDrawAt: 0,
     fleetHydrationInProgress: false,
     fleetHydrationDone: false,
     fleetHydrationAt: 0,
@@ -83,6 +85,7 @@
     toggleMA: document.getElementById('toggleMA'),
     toggleRSI: document.getElementById('toggleRSI'),
     toggleVolume: document.getElementById('toggleVolume'),
+    toggleCandleLiquidity: document.getElementById('toggleCandleLiquidity'),
     toggleMarkers: document.getElementById('toggleMarkers'),
     toggleZones: document.getElementById('toggleZones'),
     toggleNewbie: document.getElementById('toggleNewbie'),
@@ -178,6 +181,9 @@
   const maTagOverlay = document.createElement('div');
   maTagOverlay.className = 'ma-tag-overlay';
   el.chartContainer.appendChild(maTagOverlay);
+  const candleLiqOverlay = document.createElement('div');
+  candleLiqOverlay.className = 'candle-liq-overlay';
+  el.chartContainer.appendChild(candleLiqOverlay);
 
   chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
     if (!range) return;
@@ -185,6 +191,7 @@
     rsiChart.timeScale().setVisibleLogicalRange(range);
     drawSupportResistance(state.srData);
     drawMaMiniTags();
+    drawCandleLiquidityTags(true);
   });
 
   const glossaryPanel = new GlossaryPanel(document.getElementById('glossaryContainer'));
@@ -553,6 +560,7 @@
         low: Number(c.low),
         close: Number(c.close),
         volume: Number(c.volume || 0),
+        quoteVolume: Number(c.quoteVolume || c.q || 0),
         isClosed: Boolean(c.isClosed),
       });
     }
@@ -620,6 +628,7 @@
     }
     updateCandleCountdown();
     updateChartFootPriceOnly();
+    drawCandleLiquidityTags();
   }
 
   function applyIncomingCandle(timeframe, candle) {
@@ -641,7 +650,7 @@
     }
 
     if (last.time === candle.time) {
-      list[list.length - 1] = candle;
+      list[list.length - 1] = { ...last, ...candle };
       return;
     }
 
@@ -918,6 +927,84 @@
 
   function clearMaMiniTags() {
     maTagOverlay.innerHTML = '';
+  }
+
+  function clearCandleLiquidityTags() {
+    candleLiqOverlay.innerHTML = '';
+  }
+
+  function formatLiquidityShort(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n)) return 'N/A';
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+    if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+    if (abs >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
+    if (abs >= 1) return n.toFixed(2);
+    return n.toFixed(6);
+  }
+
+  function calcCandleLiquidityUSDT(candle) {
+    if (!candle) return null;
+    const q = Number(candle.quoteVolume || 0);
+    if (Number.isFinite(q) && q > 0) return q;
+    const vol = Number(candle.volume || 0);
+    const px = Number(candle.close || 0);
+    if (!(Number.isFinite(vol) && vol > 0 && Number.isFinite(px) && px > 0)) return null;
+    return vol * px;
+  }
+
+  function drawCandleLiquidityTags(force = false) {
+    const now = Date.now();
+    if (!force && now - state.lastLiquidityDrawAt < 80) return;
+    state.lastLiquidityDrawAt = now;
+
+    clearCandleLiquidityTags();
+    if (!state.toggles.candleLiquidity) return;
+    if (!Array.isArray(state.candles) || !state.candles.length) return;
+
+    const logical = chart.timeScale().getVisibleLogicalRange();
+    const fullFrom = 0;
+    const fullTo = state.candles.length - 1;
+    let from = fullFrom;
+    let to = fullTo;
+    if (logical && Number.isFinite(logical.from) && Number.isFinite(logical.to)) {
+      from = Math.max(fullFrom, Math.floor(logical.from) - 2);
+      to = Math.min(fullTo, Math.ceil(logical.to) + 2);
+    }
+
+    const minSpacingPx = 14;
+    let prevX = -Infinity;
+
+    for (let i = from; i <= to; i += 1) {
+      const c = state.candles[i];
+      if (!c) continue;
+
+      const x = chart.timeScale().timeToCoordinate(c.time);
+      if (!Number.isFinite(x)) continue;
+      const isLast = i === to;
+      if (!isLast && x - prevX < minSpacingPx) continue;
+
+      const bodyTop = Math.max(Number(c.open || 0), Number(c.close || 0));
+      const yRaw = candleSeries.priceToCoordinate(bodyTop);
+      if (!Number.isFinite(yRaw)) continue;
+
+      const liq = calcCandleLiquidityUSDT(c);
+      if (!(Number.isFinite(liq) && liq > 0)) continue;
+
+      const tag = document.createElement('div');
+      tag.className = `candle-liq-tag ${Number(c.close) >= Number(c.open) ? 'up' : 'down'}`;
+      tag.style.left = `${x}px`;
+      tag.style.top = `${Math.max(10, yRaw - 3)}px`;
+      tag.textContent = `LQ ${formatLiquidityShort(liq)}`;
+
+      const quote = Number(c.quoteVolume || 0);
+      const exactLiq = quote > 0 ? quote : liq;
+      tag.title = `Thanh khoản nến: ${exactLiq.toLocaleString('en-US', { maximumFractionDigits: 8 })} USDT`;
+
+      candleLiqOverlay.appendChild(tag);
+      prevX = x;
+    }
   }
 
   function srColor(type, strength = 'NORMAL') {
@@ -1291,6 +1378,7 @@
     const ma200Latest = ma200Data.length ? ma200Data[ma200Data.length - 1].value : null;
     const rsiLatest = rsiPoints.length ? rsiPoints[rsiPoints.length - 1].value : null;
     const closeLatest = candles.length ? candles[candles.length - 1].close : null;
+    const liqLatest = candles.length ? calcCandleLiquidityUSDT(candles[candles.length - 1]) : null;
     if (Number.isFinite(Number(closeLatest))) {
       state.livePrice = Number(closeLatest);
     }
@@ -1303,6 +1391,7 @@
         `MA99: ${formatPrice(ma99Latest)}`,
         `MA200: ${formatPrice(ma200Latest)}`,
         `RSI14: ${formatNum(rsiLatest, 2)}`,
+        `LQ nến: ${formatLiquidityShort(liqLatest)} USDT`,
       ].join(' | ');
     }
 
@@ -1314,6 +1403,7 @@
       lastTime: candles.length ? candles[candles.length - 1].time : null,
     };
     drawMaMiniTags();
+    drawCandleLiquidityTags(true);
     updateCandleCountdown();
 
     window.__chartReady = true;
@@ -2007,6 +2097,7 @@
       low: Number(k[3]),
       close: Number(k[4]),
       volume: Number(k[5]),
+      quoteVolume: Number(k[7] || 0),
       isClosed: Number(k[6]) <= now,
     }));
   }
@@ -2086,6 +2177,7 @@
             low: Number(k.l),
             close: Number(k.c),
             volume: Number(k.v),
+            quoteVolume: Number(k.q || 0),
             isClosed: Boolean(k.x),
           };
           if (!Number.isFinite(candle.time)) return;
@@ -2168,6 +2260,7 @@
           low: Number(c.low),
           close: Number(c.close),
           volume: Number(c.volume),
+          quoteVolume: Number(c.quoteVolume || c.q || 0),
           isClosed: Boolean(c.isClosed),
         });
         updateRealtimeCandle();
@@ -2243,6 +2336,7 @@
     drawTradeZones(null);
     clearSupportResistanceVisuals();
     clearMaMiniTags();
+    clearCandleLiquidityTags();
     await loadInitialCandles(true, true);
     connectStream();
     connectDirectKlineStream();
@@ -2367,6 +2461,11 @@
 
     el.toggleVolume.addEventListener('change', (e) => {
       state.toggles.volume = e.target.checked;
+      renderChart();
+    });
+
+    el.toggleCandleLiquidity.addEventListener('change', (e) => {
+      state.toggles.candleLiquidity = e.target.checked;
       renderChart();
     });
 

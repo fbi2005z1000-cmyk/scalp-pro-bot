@@ -161,6 +161,199 @@ class IndicatorService {
     return { middle, upper, lower, bandwidth };
   }
 
+  static roc(values, period = 12) {
+    if (!Array.isArray(values) || values.length < period + 1) {
+      return new Array(values?.length || 0).fill(null);
+    }
+
+    const result = new Array(values.length).fill(null);
+    for (let i = period; i < values.length; i += 1) {
+      const prev = values[i - period];
+      if (!Number.isFinite(prev) || prev === 0) continue;
+      result[i] = ((values[i] - prev) / prev) * 100;
+    }
+    return result;
+  }
+
+  static smoothNullable(values, period) {
+    if (!Array.isArray(values) || !values.length || period <= 1) {
+      return [...(values || [])];
+    }
+    const result = new Array(values.length).fill(null);
+    for (let i = period - 1; i < values.length; i += 1) {
+      const window = values.slice(i - period + 1, i + 1).filter((v) => Number.isFinite(v));
+      if (window.length < period) continue;
+      result[i] = average(window);
+    }
+    return result;
+  }
+
+  static stochastic(candles, kPeriod = 14, dPeriod = 3) {
+    if (!Array.isArray(candles) || candles.length < kPeriod) {
+      const len = candles?.length || 0;
+      return {
+        k: new Array(len).fill(null),
+        d: new Array(len).fill(null),
+      };
+    }
+
+    const len = candles.length;
+    const kRaw = new Array(len).fill(null);
+    for (let i = kPeriod - 1; i < len; i += 1) {
+      const window = candles.slice(i - kPeriod + 1, i + 1);
+      const highestHigh = Math.max(...window.map((c) => c.high));
+      const lowestLow = Math.min(...window.map((c) => c.low));
+      const range = highestHigh - lowestLow;
+      if (range <= 0) {
+        kRaw[i] = 50;
+        continue;
+      }
+      kRaw[i] = ((candles[i].close - lowestLow) / range) * 100;
+    }
+
+    const k = this.smoothNullable(kRaw, 3);
+    const d = this.smoothNullable(k, dPeriod);
+    return { k, d };
+  }
+
+  static stochRsi(rsiValues, period = 14, smoothK = 3, smoothD = 3) {
+    if (!Array.isArray(rsiValues) || rsiValues.length < period + smoothD) {
+      const len = rsiValues?.length || 0;
+      return {
+        k: new Array(len).fill(null),
+        d: new Array(len).fill(null),
+      };
+    }
+
+    const len = rsiValues.length;
+    const raw = new Array(len).fill(null);
+    for (let i = period; i < len; i += 1) {
+      const window = rsiValues
+        .slice(i - period + 1, i + 1)
+        .filter((v) => Number.isFinite(v));
+      if (window.length < period) continue;
+      const highest = Math.max(...window);
+      const lowest = Math.min(...window);
+      const range = highest - lowest;
+      if (range <= 0) {
+        raw[i] = 50;
+        continue;
+      }
+      raw[i] = ((rsiValues[i] - lowest) / range) * 100;
+    }
+
+    const k = this.smoothNullable(raw, smoothK);
+    const d = this.smoothNullable(k, smoothD);
+    return { k, d };
+  }
+
+  static cci(candles, period = 20) {
+    if (!Array.isArray(candles) || candles.length < period) {
+      return new Array(candles?.length || 0).fill(null);
+    }
+
+    const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+    const tpSma = this.sma(tp, period);
+    const result = new Array(candles.length).fill(null);
+
+    for (let i = period - 1; i < candles.length; i += 1) {
+      const mean = tpSma[i];
+      if (!Number.isFinite(mean)) continue;
+      const window = tp.slice(i - period + 1, i + 1);
+      const meanDeviation = average(window.map((v) => Math.abs(v - mean)));
+      if (!Number.isFinite(meanDeviation) || meanDeviation === 0) continue;
+      result[i] = (tp[i] - mean) / (0.015 * meanDeviation);
+    }
+    return result;
+  }
+
+  static williamsR(candles, period = 14) {
+    if (!Array.isArray(candles) || candles.length < period) {
+      return new Array(candles?.length || 0).fill(null);
+    }
+
+    const result = new Array(candles.length).fill(null);
+    for (let i = period - 1; i < candles.length; i += 1) {
+      const window = candles.slice(i - period + 1, i + 1);
+      const highestHigh = Math.max(...window.map((c) => c.high));
+      const lowestLow = Math.min(...window.map((c) => c.low));
+      const range = highestHigh - lowestLow;
+      if (range <= 0) continue;
+      result[i] = -((highestHigh - candles[i].close) / range) * 100;
+    }
+    return result;
+  }
+
+  static vwap(candles) {
+    if (!Array.isArray(candles) || !candles.length) {
+      return [];
+    }
+    const result = new Array(candles.length).fill(null);
+    let cumPv = 0;
+    let cumVol = 0;
+    for (let i = 0; i < candles.length; i += 1) {
+      const tp = (candles[i].high + candles[i].low + candles[i].close) / 3;
+      const vol = candles[i].volume || 0;
+      cumPv += tp * vol;
+      cumVol += vol;
+      if (cumVol <= 0) continue;
+      result[i] = cumPv / cumVol;
+    }
+    return result;
+  }
+
+  static mfi(candles, period = 14) {
+    if (!Array.isArray(candles) || candles.length < period + 1) {
+      return new Array(candles?.length || 0).fill(null);
+    }
+
+    const result = new Array(candles.length).fill(null);
+    const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+    const rawFlow = candles.map((c, idx) => tp[idx] * (c.volume || 0));
+
+    for (let i = period; i < candles.length; i += 1) {
+      let positive = 0;
+      let negative = 0;
+      for (let j = i - period + 1; j <= i; j += 1) {
+        if (tp[j] > tp[j - 1]) positive += rawFlow[j] || 0;
+        else if (tp[j] < tp[j - 1]) negative += rawFlow[j] || 0;
+      }
+
+      if (negative === 0) {
+        result[i] = 100;
+        continue;
+      }
+      const ratio = positive / negative;
+      result[i] = 100 - 100 / (1 + ratio);
+    }
+
+    return result;
+  }
+
+  static cmf(candles, period = 20) {
+    if (!Array.isArray(candles) || candles.length < period) {
+      return new Array(candles?.length || 0).fill(null);
+    }
+
+    const mfv = candles.map((c) => {
+      const range = c.high - c.low;
+      if (!Number.isFinite(range) || range <= 0) return 0;
+      const multiplier = ((c.close - c.low) - (c.high - c.close)) / range;
+      return multiplier * (c.volume || 0);
+    });
+
+    const result = new Array(candles.length).fill(null);
+    for (let i = period - 1; i < candles.length; i += 1) {
+      const volSum = candles
+        .slice(i - period + 1, i + 1)
+        .reduce((sum, c) => sum + (c.volume || 0), 0);
+      if (volSum <= 0) continue;
+      const mfvSum = mfv.slice(i - period + 1, i + 1).reduce((sum, v) => sum + v, 0);
+      result[i] = mfvSum / volSum;
+    }
+    return result;
+  }
+
   static adx(candles, period = 14) {
     if (!Array.isArray(candles) || candles.length < period * 2 + 2) {
       const len = candles?.length || 0;
@@ -281,6 +474,10 @@ class IndicatorService {
         priceSpeed: 0,
         absorptionScore: 0,
         imbalance: 0,
+        takerBuyRatio: 0,
+        tradeIntensity: 0,
+        liquidityScore: 0,
+        quoteVolumeStatus: 'THẤP',
       };
     }
 
@@ -290,6 +487,9 @@ class IndicatorService {
     const closesNearLow = [];
     const ranges = [];
     const volumes = [];
+    const quoteVolumes = [];
+    const tradeCounts = [];
+    const takerBuyQuoteVolumes = [];
     const signedVolumes = [];
     const closes = [];
     const absorptionScores = [];
@@ -308,6 +508,9 @@ class IndicatorService {
       closesNearLow.push(closeNearLow);
       ranges.push(range);
       volumes.push(c.volume || 0);
+      quoteVolumes.push(c.quoteVolume || 0);
+      tradeCounts.push(c.tradeCount || 0);
+      takerBuyQuoteVolumes.push(c.takerBuyQuoteVolume || 0);
       signedVolumes.push(signedVolume);
       closes.push(c.close);
       absorptionScores.push(absorption);
@@ -315,9 +518,20 @@ class IndicatorService {
 
     const avgRange = average(ranges) || 1;
     const avgVolume = average(volumes) || 1;
+    const avgQuoteVolume = average(quoteVolumes) || 1;
+    const avgTradeCount = average(tradeCounts) || 1;
     const totalVolume = volumes.reduce((sum, v) => sum + v, 0) || 1;
+    const totalQuoteVolume = quoteVolumes.reduce((sum, v) => sum + v, 0) || 1;
+    const totalTakerBuyQuoteVolume =
+      takerBuyQuoteVolumes.reduce((sum, v) => sum + v, 0) || 0;
     const deltaVolume = signedVolumes.reduce((sum, v) => sum + v, 0);
     const deltaVolumeTrend = (deltaVolume / totalVolume) * 100;
+    const takerBuyRatio = clamp(totalTakerBuyQuoteVolume / totalQuoteVolume, 0, 1);
+    const tradeIntensity = clamp(
+      (tradeCounts[tradeCounts.length - 1] || 0) / Math.max(avgTradeCount, 1),
+      0,
+      3,
+    );
 
     const last = slice[slice.length - 1];
     const lastRange = Math.max(last.high - last.low, 0.0000001);
@@ -333,17 +547,29 @@ class IndicatorService {
     const speedBoostSell = clamp(-priceSpeed * 1800, -25, 25);
 
     const volumeBoost = clamp((last.volume || 0) / avgVolume, 0.4, 2.5);
+    const quoteBoost = clamp((last.quoteVolume || 0) / avgQuoteVolume, 0.4, 2.8);
     const rangeBoost = clamp(lastRange / avgRange, 0.5, 2.5);
     const deltaBoostBuy = clamp(deltaVolumeTrend, -30, 30);
     const deltaBoostSell = clamp(-deltaVolumeTrend, -30, 30);
+    const takerBoostBuy = clamp((takerBuyRatio - 0.5) * 120, -30, 30);
+    const takerBoostSell = clamp((0.5 - takerBuyRatio) * 120, -30, 30);
+    const tradeBoost = clamp((tradeIntensity - 1) * 16, -12, 18);
     const absorptionScore = normalizeStrength(average(absorptionScores) * 100, 5, 80);
+    const liquidityScore = normalizeStrength(
+      quoteBoost * 55 + tradeIntensity * 20 + volumeBoost * 25,
+      15,
+      220,
+    );
 
     const buyRaw =
       average(closesNearHigh) * 40 +
       average(bodyRatios) * 30 +
       lastBuyComponent * 20 +
       volumeBoost * 6 +
+      quoteBoost * 4 +
       rangeBoost * 4 +
+      tradeBoost * 0.8 +
+      takerBoostBuy * 0.55 +
       deltaBoostBuy * 0.5 +
       speedBoostBuy * 0.45;
 
@@ -352,7 +578,10 @@ class IndicatorService {
       average(bodyRatios) * 30 +
       lastSellComponent * 20 +
       volumeBoost * 6 +
+      quoteBoost * 4 +
       rangeBoost * 4 +
+      tradeBoost * 0.8 +
+      takerBoostSell * 0.55 +
       deltaBoostSell * 0.5 +
       speedBoostSell * 0.45;
 
@@ -367,6 +596,9 @@ class IndicatorService {
       return 'YẾU';
     };
 
+    const quoteVolumeStatus =
+      quoteBoost >= 1.45 ? 'CAO' : quoteBoost >= 1.05 ? 'TRUNG_BÌNH' : 'THẤP';
+
     return {
       buyPressure,
       sellPressure,
@@ -378,6 +610,10 @@ class IndicatorService {
       priceSpeed,
       absorptionScore,
       imbalance,
+      takerBuyRatio,
+      tradeIntensity,
+      liquidityScore,
+      quoteVolumeStatus,
       absorption:
         lastBodyRatio < 0.35 &&
         volumeBoost > 1.25 &&
@@ -410,6 +646,14 @@ class IndicatorService {
     const macd = this.macd(closes, 12, 26, 9);
     const bb = this.bollinger(closes, 20, 2);
     const adxPack = this.adx(candles, 14);
+    const stochPack = this.stochastic(candles, 14, 3);
+    const stochRsiPack = this.stochRsi(rsi14, 14, 3, 3);
+    const cci20 = this.cci(candles, 20);
+    const williamsR14 = this.williamsR(candles, 14);
+    const roc9 = this.roc(closes, 9);
+    const vwap = this.vwap(candles);
+    const mfi14 = this.mfi(candles, 14);
+    const cmf20 = this.cmf(candles, 20);
 
     const latestIndex = candles.length - 1;
 
@@ -432,6 +676,16 @@ class IndicatorService {
       adx: adxPack.adx,
       plusDI: adxPack.plusDI,
       minusDI: adxPack.minusDI,
+      stochK: stochPack.k,
+      stochD: stochPack.d,
+      stochRsiK: stochRsiPack.k,
+      stochRsiD: stochRsiPack.d,
+      cci20,
+      williamsR14,
+      roc9,
+      vwap,
+      mfi14,
+      cmf20,
       latest: {
         ma7: ma7[latestIndex],
         ma25: ma25[latestIndex],
@@ -451,6 +705,16 @@ class IndicatorService {
         adx: adxPack.adx[latestIndex],
         plusDI: adxPack.plusDI[latestIndex],
         minusDI: adxPack.minusDI[latestIndex],
+        stochK: stochPack.k[latestIndex],
+        stochD: stochPack.d[latestIndex],
+        stochRsiK: stochRsiPack.k[latestIndex],
+        stochRsiD: stochRsiPack.d[latestIndex],
+        cci20: cci20[latestIndex],
+        williamsR14: williamsR14[latestIndex],
+        roc9: roc9[latestIndex],
+        vwap: vwap[latestIndex],
+        mfi14: mfi14[latestIndex],
+        cmf20: cmf20[latestIndex],
         ma7Slope: calcSlope(ma7.filter((v) => v !== null), 5),
         ma25Slope: calcSlope(ma25.filter((v) => v !== null), 5),
         ma99Slope: calcSlope(ma99.filter((v) => v !== null), 6),

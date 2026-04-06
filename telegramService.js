@@ -10,6 +10,24 @@ function esc(value) {
     .replaceAll('"', '&quot;');
 }
 
+function toSafeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatPriceAdaptive(value) {
+  const n = toSafeNumber(value);
+  if (n === null) return 'N/A';
+  const abs = Math.abs(n);
+  if (abs >= 1000) return n.toFixed(2);
+  if (abs >= 100) return n.toFixed(3);
+  if (abs >= 1) return n.toFixed(4);
+  if (abs >= 0.1) return n.toFixed(5);
+  if (abs >= 0.01) return n.toFixed(6);
+  if (abs >= 0.001) return n.toFixed(7);
+  return n.toFixed(8);
+}
+
 class TelegramService {
   constructor(config, logger) {
     this.config = config.telegram;
@@ -557,9 +575,11 @@ class TelegramService {
       const s1 = supports.find((z) => z.label === 'S1') || supports[0];
       const ma25 = market.ma2m?.ma25;
       if (s1?.price) {
-        return `Gần ${s1.label || 'S1'} Support (Hỗ trợ) ${Number(s1.price).toFixed(2)}${ma25 ? ` + MA25 ${Number(ma25).toFixed(2)}` : ''}`;
+        return `Gần ${s1.label || 'S1'} Support (Hỗ trợ) ${formatPriceAdaptive(s1.price)}${
+          ma25 ? ` + MA25 ${formatPriceAdaptive(ma25)}` : ''
+        }`;
       }
-      if (key.support) return `Gần Support (Hỗ trợ) ${Number(key.support).toFixed(2)}`;
+      if (key.support) return `Gần Support (Hỗ trợ) ${formatPriceAdaptive(key.support)}`;
       return 'Vùng pullback theo MA25/Support';
     }
 
@@ -567,9 +587,11 @@ class TelegramService {
       const r1 = resistances.find((z) => z.label === 'R1') || resistances[0];
       const ma25 = market.ma2m?.ma25;
       if (r1?.price) {
-        return `Gần ${r1.label || 'R1'} Resistance (Kháng cự) ${Number(r1.price).toFixed(2)}${ma25 ? ` + MA25 ${Number(ma25).toFixed(2)}` : ''}`;
+        return `Gần ${r1.label || 'R1'} Resistance (Kháng cự) ${formatPriceAdaptive(r1.price)}${
+          ma25 ? ` + MA25 ${formatPriceAdaptive(ma25)}` : ''
+        }`;
       }
-      if (key.resistance) return `Gần Resistance (Kháng cự) ${Number(key.resistance).toFixed(2)}`;
+      if (key.resistance) return `Gần Resistance (Kháng cự) ${formatPriceAdaptive(key.resistance)}`;
       return 'Vùng pullback theo MA25/Resistance';
     }
 
@@ -584,14 +606,14 @@ class TelegramService {
     if (side === 'LONG') {
       return [
         '- Chờ nến xác nhận tăng (bullish engulfing hoặc pinbar rút chân dưới)',
-        `- Nến đóng trên vùng entry (${entryMin.toFixed(2)} - ${entryMax.toFixed(2)})`,
+        `- Nến đóng trên vùng entry (${formatPriceAdaptive(entryMin)} - ${formatPriceAdaptive(entryMax)})`,
       ].join('\n');
     }
 
     if (side === 'SHORT') {
       return [
         '- Chờ nến xác nhận giảm (bearish engulfing hoặc pinbar rút râu trên)',
-        `- Nến đóng dưới vùng entry (${entryMin.toFixed(2)} - ${entryMax.toFixed(2)})`,
+        `- Nến đóng dưới vùng entry (${formatPriceAdaptive(entryMin)} - ${formatPriceAdaptive(entryMax)})`,
       ].join('\n');
     }
 
@@ -641,16 +663,16 @@ class TelegramService {
 
     if (side === 'SHORT') {
       return [
-        r1 > 0 ? `Giá hồi lên gần kháng cự (${r1.toFixed(r1 < 1 ? 4 : 2)})` : 'Giá hồi lên gần vùng kháng cự',
-        ma25 > 0 ? `Giá bám quanh MA25 (${ma25.toFixed(ma25 < 1 ? 4 : 2)})` : 'Giá bám quanh MA25',
+        r1 > 0 ? `Giá hồi lên gần kháng cự (${formatPriceAdaptive(r1)})` : 'Giá hồi lên gần vùng kháng cự',
+        ma25 > 0 ? `Giá bám quanh MA25 (${formatPriceAdaptive(ma25)})` : 'Giá bám quanh MA25',
         `Xu hướng 5m đang ${trendVi}`,
       ];
     }
 
     if (side === 'LONG') {
       return [
-        s1 > 0 ? `Giá hồi về gần hỗ trợ (${s1.toFixed(s1 < 1 ? 4 : 2)})` : 'Giá hồi về gần vùng hỗ trợ',
-        ma25 > 0 ? `Giá bám quanh MA25 (${ma25.toFixed(ma25 < 1 ? 4 : 2)})` : 'Giá bám quanh MA25',
+        s1 > 0 ? `Giá hồi về gần hỗ trợ (${formatPriceAdaptive(s1)})` : 'Giá hồi về gần vùng hỗ trợ',
+        ma25 > 0 ? `Giá bám quanh MA25 (${formatPriceAdaptive(ma25)})` : 'Giá bám quanh MA25',
         `Xu hướng 5m đang ${trendVi}`,
       ];
     }
@@ -714,11 +736,7 @@ class TelegramService {
       ? `🧠 Bộ lọc 2 tầng: P1 ${pack1?.ok ? '✅' : '❌'} | P2 ${pack2?.ok ? '✅' : '❌'} | Consensus ${packConsensus?.ok ? '✅' : '❌'}`
       : '';
 
-    const fmtPrice = (val) => {
-      const n = Number(val);
-      if (!Number.isFinite(n)) return 'N/A';
-      return Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2);
-    };
+    const fmtPrice = (val) => formatPriceAdaptive(val);
 
     const text = [
       `${botBadge}`,
@@ -782,14 +800,7 @@ class TelegramService {
     const market = signalData.market || {};
     const pa = signalData.priceAction || market.priceAction || {};
 
-    const fmtPrice = (val) => {
-      const n = Number(val);
-      if (!Number.isFinite(n)) return 'N/A';
-      const abs = Math.abs(n);
-      if (abs < 1) return n.toFixed(4);
-      if (abs < 100) return n.toFixed(3);
-      return n.toFixed(2);
-    };
+    const fmtPrice = (val) => formatPriceAdaptive(val);
 
     const trendRaw = String(signalData.trend5m || market.trend || 'N/A').toUpperCase();
     const trendVi =
@@ -933,14 +944,7 @@ class TelegramService {
       ? changes.slice(0, 4).map((c) => `- ${esc(String(c))}`)
       : ['- Cập nhật nhỏ về vùng giá/chất lượng kèo'];
 
-    const fmtPrice = (val) => {
-      const n = Number(val);
-      if (!Number.isFinite(n)) return 'N/A';
-      const abs = Math.abs(n);
-      if (abs < 1) return n.toFixed(4);
-      if (abs < 100) return n.toFixed(3);
-      return n.toFixed(2);
-    };
+    const fmtPrice = (val) => formatPriceAdaptive(val);
 
     const msg = [
       `${botBadge}`,
@@ -993,7 +997,7 @@ class TelegramService {
         `Coin: ${coinIcon} <b>${esc(orderData.symbol)}</b>`,
         `Loại: <b>${esc(orderData.side)}</b>`,
         this.buildEntryCandleColorText(orderData.side, false),
-        `Giá vào: <b>${Number(orderData.entryPrice || 0).toFixed(2)}</b>`,
+        `Giá vào: <b>${formatPriceAdaptive(orderData.entryPrice)}</b>`,
         `Khối lượng: <b>${Number(orderData.size || 0).toFixed(4)}</b>`,
         `Đòn bẩy: x${esc(orderData.leverage)}`,
         `Lý do: ${esc(orderData.reason || 'N/A')}`,
@@ -1073,9 +1077,11 @@ class TelegramService {
       `${botBadge}`,
       `🛡️ <b>GIÁM SÁT LỆNH 5S</b> ${icon} <b>${esc(side)}</b>`,
       `Coin: ${coinIcon} <b>${esc(heartbeat.symbol || 'N/A')}</b>`,
-      `Giá hiện tại: <b>${Number(heartbeat.currentPrice || 0).toFixed(2)}</b> ${dirIcon} ${direction}`,
-      `Entry: <b>${Number(heartbeat.entryPrice || 0).toFixed(2)}</b>`,
-      `SL/TP: <b>${Number(heartbeat.stopLoss || 0).toFixed(2)} | ${Number(heartbeat.tp1 || 0).toFixed(2)} / ${Number(heartbeat.tp2 || 0).toFixed(2)} / ${Number(heartbeat.tp3 || 0).toFixed(2)}</b>`,
+      `Giá hiện tại: <b>${formatPriceAdaptive(heartbeat.currentPrice)}</b> ${dirIcon} ${direction}`,
+      `Entry: <b>${formatPriceAdaptive(heartbeat.entryPrice)}</b>`,
+      `SL/TP: <b>${formatPriceAdaptive(heartbeat.stopLoss)} | ${formatPriceAdaptive(
+        heartbeat.tp1,
+      )} / ${formatPriceAdaptive(heartbeat.tp2)} / ${formatPriceAdaptive(heartbeat.tp3)}</b>`,
       `Đòn bẩy: <b>x${Number(heartbeat.leverage || 0).toFixed(0)}</b>`,
       `${pnlIcon} PnL hiện tại: <b>${rawPnl >= 0 ? '+' : ''}${rawPnl.toFixed(3)}%</b> (x lev: <b>${levPnl >= 0 ? '+' : ''}${levPnl.toFixed(2)}%</b>)`,
       `ROI ròng sau phí: <b>${netRoi >= 0 ? '+' : ''}${netRoi.toFixed(2)}%</b> (phí ~${feePenalty.toFixed(2)}%)`,
@@ -1108,8 +1114,8 @@ class TelegramService {
       `${botBadge}`,
       `🚨 <b>CẢNH BÁO NGUY CƠ VƯỢT SL CAO</b> ${sideIcon}`,
       `Coin: ${coinIcon} <b>${esc(symbol)}</b> | Side: <b>${esc(side || 'N/A')}</b>`,
-      `Giá hiện tại: <b>${Number(warning.currentPrice || 0).toFixed(4)}</b>`,
-      `Entry/SL: <b>${Number(warning.entryPrice || 0).toFixed(4)} / ${Number(warning.stopLoss || 0).toFixed(4)}</b>`,
+      `Giá hiện tại: <b>${formatPriceAdaptive(warning.currentPrice)}</b>`,
+      `Entry/SL: <b>${formatPriceAdaptive(warning.entryPrice)} / ${formatPriceAdaptive(warning.stopLoss)}</b>`,
       `⚠️ Xác suất chạm/vượt SL: <b>${stopRiskPct.toFixed(1)}%</b>`,
       `📉 Xác suất an toàn realtime: <b>${probability.toFixed(1)}%</b>`,
       `📏 Mức sử dụng vùng rủi ro: <b>${riskUsedPct.toFixed(1)}%</b>`,

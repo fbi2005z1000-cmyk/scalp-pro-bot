@@ -24,8 +24,8 @@ function createRateLimiter(config, logger) {
     buckets.set(ip, item);
 
     if (item.count > max) {
-      logger.warn('api', 'Rate limit b? ch?n', { ip, path: req.path, method: req.method });
-      return res.status(429).json({ ok: false, error: 'Quá nhi?u request, vui lòng th? l?i sau' });
+      logger.warn('api', 'Rate limit bị chặn', { ip, path: req.path, method: req.method });
+      return res.status(429).json({ ok: false, error: 'Quá nhiều request, vui lòng thử lại sau' });
     }
 
     return next();
@@ -48,7 +48,7 @@ function createAdminGuard(config) {
       return next();
     }
 
-    return res.status(401).json({ ok: false, error: 'Thi?u ho?c sai admin token' });
+    return res.status(401).json({ ok: false, error: 'Thiếu hoặc sai admin token' });
   };
 }
 
@@ -56,7 +56,7 @@ function validateOrReject(res, result) {
   if (result.ok) return false;
   return res.status(400).json({
     ok: false,
-    error: 'Payload không h?p l?',
+    error: 'Payload không hợp lệ',
     details: result.errors,
   });
 }
@@ -127,7 +127,7 @@ function createApi({ botEngine, logger, statsService, glossary, stateStore, conf
     const analysisTf = config.timeframe.analysis || '3m';
     const allow = Array.from(new Set(['1m', '3m', analysisTf, '5m', '15m']));
     if (!allow.includes(timeframe)) {
-      return res.status(400).json({ ok: false, error: 'timeframe không h?p l?' });
+      return res.status(400).json({ ok: false, error: 'timeframe không hợp lệ' });
     }
     try {
       if (fresh) {
