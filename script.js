@@ -1644,15 +1644,28 @@
     const pre = signal?.preSignal?.selected || null;
     const mode = String(status?.mode || 'SIGNAL_ONLY');
     const autoMode = mode === 'AUTO_BOT';
+    const autoControl = status?.autoControl || {};
     const riskLocked = status?.stateMachine === 'PAUSED_BY_RISK' || Boolean(status?.risk?.lockedByRisk);
     const hasPosition = Boolean(status?.activePosition);
     const cooldownActive = Boolean(status?.cooldownActive);
+    const allowAuto = Object.prototype.hasOwnProperty.call(autoControl, 'allowAuto')
+      ? Boolean(autoControl.allowAuto)
+      : true;
+    const liveOrderEnabled = Object.prototype.hasOwnProperty.call(autoControl, 'liveOrderEnabled')
+      ? Boolean(autoControl.liveOrderEnabled)
+      : false;
+    const autoEngineRunning = Object.prototype.hasOwnProperty.call(autoControl, 'autoEngineRunning')
+      ? Boolean(autoControl.autoEngineRunning)
+      : autoMode && Boolean(status?.botRunning) && allowAuto;
+    const canPlaceRealOrder = Object.prototype.hasOwnProperty.call(autoControl, 'canPlaceRealOrder')
+      ? Boolean(autoControl.canPlaceRealOrder)
+      : autoEngineRunning && liveOrderEnabled;
+    const blockedReasons = Array.isArray(autoControl?.blockedReasons) ? autoControl.blockedReasons : [];
     const conf = Number(signal?.confidence || 0);
     const requiredScore = Number(signal?.requiredScore || diagnostics?.requiredScore || 0);
     const scoreGateOk = requiredScore > 0 ? conf >= requiredScore : conf >= 75;
     const autoReady =
-      autoMode &&
-      Boolean(status?.botRunning) &&
+      autoEngineRunning &&
       !riskLocked &&
       !cooldownActive &&
       !hasPosition &&
@@ -1660,9 +1673,12 @@
       signal?.side &&
       signal.side !== 'NO_TRADE';
 
-    if (autoReady) {
+    if (autoReady && canPlaceRealOrder) {
       el.autoTradeBadge.className = 'badge long';
-      el.autoTradeBadge.textContent = 'AUTO SẴN SÀNG VÀO';
+      el.autoTradeBadge.textContent = 'AUTO LIVE SẴN SÀNG';
+    } else if (autoReady && !canPlaceRealOrder) {
+      el.autoTradeBadge.className = 'badge warn';
+      el.autoTradeBadge.textContent = 'AUTO TEST (KHÔNG VÀO LỆNH THẬT)';
     } else if (autoMode) {
       el.autoTradeBadge.className = 'badge warn';
       el.autoTradeBadge.textContent = 'AUTO ĐANG CHẶN';
@@ -1680,7 +1696,11 @@
     const summaryRows = [
       ['Mode', mode, 'CONFIDENCE'],
       ['Bot chạy', boolText(Boolean(status?.botRunning)), 'CONFIDENCE'],
+      ['ALLOW_AUTO', boolText(allowAuto), 'CONFIDENCE'],
+      ['LIVE_ORDER', boolText(liveOrderEnabled), 'CONFIDENCE'],
       ['Auto gate', autoMode ? 'BẬT' : 'TẮT', 'CONFIDENCE'],
+      ['Auto engine', boolText(autoEngineRunning), 'CONFIDENCE'],
+      ['Đặt lệnh thật', boolText(canPlaceRealOrder), 'CONFIDENCE'],
       ['Auto sẵn sàng', autoReady ? 'CÓ' : 'KHÔNG', 'CONFIDENCE'],
       ['State machine', status?.stateMachine || 'N/A', 'SIDEWAY'],
       ['Risk lock', riskLocked ? 'CÓ' : 'KHÔNG', 'SIDEWAY'],
@@ -1756,9 +1776,13 @@
     const baseRejects = Array.isArray(signal?.rejects) ? signal.rejects.slice(0, 4) : [];
     const baseDiagnostics = Array.isArray(diagnostics?.rejects) ? diagnostics.rejects.slice(0, 4) : [];
     const explain = [];
-    if (autoReady) explain.push('AUTO pass toàn bộ gate cơ bản, có thể vào lệnh khi tín hiệu giữ ổn định.');
-    else if (!autoMode) explain.push('Đang không ở AUTO_BOT, bot chỉ phân tích/gợi ý.');
+    if (autoReady && canPlaceRealOrder) {
+      explain.push('AUTO LIVE pass gate và có thể vào lệnh thật khi tín hiệu giữ ổn định.');
+    } else if (autoReady && !canPlaceRealOrder) {
+      explain.push('AUTO đang ở chế độ TEST: phân tích đầy đủ nhưng không khớp lệnh thật.');
+    } else if (!autoMode) explain.push('Đang không ở AUTO_BOT, bot chỉ phân tích/gợi ý.');
     else explain.push('AUTO đang bị chặn bởi một hoặc nhiều điều kiện risk/filter.');
+    if (blockedReasons.length) explain.push(`Auto blocked: ${blockedReasons.join(' | ')}`);
     if (baseReasons.length) explain.push(`Lý do thuận: ${baseReasons.join(' | ')}`);
     if (baseRejects.length) explain.push(`Lý do chặn: ${baseRejects.join(' | ')}`);
     else if (baseDiagnostics.length) explain.push(`Chẩn đoán: ${baseDiagnostics.join(' | ')}`);
@@ -1807,12 +1831,18 @@
     const indicatorText = `RSI14: ${formatNum(i.rsi, 2)} | MA7: ${formatPrice(i.ma7)} | MA25: ${formatPrice(i.ma25)} | MA99: ${formatPrice(i.ma99)} | MA200: ${formatPrice(i.ma200)}`;
     const tzText = `TZ: ${state.timezoneMode === 'VN' ? 'UTC+7' : state.timezoneMode}`;
     const marketSource = status.binance?.useTestnet ? 'FUTURES TESTNET' : 'FUTURES MAINNET';
+    const autoCtl = status.autoControl || {};
+    const autoText = autoCtl.autoMode
+      ? autoCtl.canPlaceRealOrder
+        ? 'AUTO LIVE: ON'
+        : 'AUTO TEST: ON'
+      : 'AUTO: OFF';
 
     const riskLocked = status.stateMachine === 'PAUSED_BY_RISK' || status.risk?.lockedByRisk;
     el.killSwitchBtn.textContent = riskLocked ? 'Mở Khóa Risk Lock' : 'Kill Switch';
 
     updateCandleCountdown();
-    el.chartFootNote.textContent = `${cooldownText} | Nến còn: ${state.candleCountdownText} | ${pos} | ${priceText} | ${indicatorText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
+    el.chartFootNote.textContent = `${cooldownText} | Nến còn: ${state.candleCountdownText} | ${pos} | ${priceText} | ${indicatorText} | ${autoText} | ${marketSource} | ${tzText} | Reconnect: ${status.reconnectCount}`;
     renderRsGuidePanel();
     renderAutoTrade(status, state.signal || status.lastSignal || null);
     renderFleet(status);

@@ -4319,10 +4319,40 @@ class BotEngine {
     const directBotList = health.bots;
     const outcomeHealth = this.getOutcomeBotHealthSnapshot();
     const outcomeBotList = outcomeHealth.bots;
+    const baseStatus = this.stateStore.getStatus();
+    const mode = String(baseStatus.mode || 'SIGNAL_ONLY');
+    const botRunning = Boolean(baseStatus.botRunning);
+    const allowAuto = Boolean(this.config?.trading?.allowAuto);
+    const liveOrderEnabled = Boolean(this.orderManager?.liveOrderEnabled);
+    const autoMode = mode === 'AUTO_BOT';
+    const autoEngineRunning = autoMode && botRunning && allowAuto;
+    const canPlaceRealOrder = autoEngineRunning && liveOrderEnabled;
+    const autoBlockedReasons = [];
+    if (!autoMode) autoBlockedReasons.push('MODE_NOT_AUTO_BOT');
+    if (!botRunning) autoBlockedReasons.push('BOT_STOPPED');
+    if (!allowAuto) autoBlockedReasons.push('ALLOW_AUTO_FALSE');
+    if (!liveOrderEnabled) autoBlockedReasons.push('LIVE_ORDER_DISABLED');
+    if (baseStatus?.risk?.lockedByRisk) autoBlockedReasons.push('RISK_LOCKED');
+    if (baseStatus?.cooldownActive) autoBlockedReasons.push('COOLDOWN_ACTIVE');
+    if (baseStatus?.activePosition) autoBlockedReasons.push('HAS_OPEN_POSITION');
+    if (String(baseStatus?.stateMachine || '').includes('PAUSED_BY_SIDEWAY')) {
+      autoBlockedReasons.push('PAUSED_BY_SIDEWAY');
+    }
+
     return {
-      ...this.stateStore.getStatus(),
+      ...baseStatus,
       profile: this.config.profile || 'BALANCED',
       priceSource: this.config.trading.priceSource,
+      autoControl: {
+        mode,
+        botRunning,
+        allowAuto,
+        liveOrderEnabled,
+        autoMode,
+        autoEngineRunning,
+        canPlaceRealOrder,
+        blockedReasons: autoBlockedReasons,
+      },
       advanced: this.config.advanced,
       positionSizing: this.config.positionSizing,
       scanner: {
