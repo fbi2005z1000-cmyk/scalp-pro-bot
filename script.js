@@ -1661,8 +1661,12 @@
       ? Boolean(autoControl.canPlaceRealOrder)
       : autoEngineRunning && liveOrderEnabled;
     const blockedReasons = Array.isArray(autoControl?.blockedReasons) ? autoControl.blockedReasons : [];
+    const autoDecision = autoControl?.decision?.last || null;
     const conf = Number(signal?.confidence || 0);
     const requiredScore = Number(signal?.requiredScore || diagnostics?.requiredScore || 0);
+    const autoIntentScore = Number(autoDecision?.intent?.intentScore || 0);
+    const autoWinProbability = Number(autoDecision?.intent?.winProbability || 0);
+    const autoCode = autoDecision?.code || 'N/A';
     const scoreGateOk = requiredScore > 0 ? conf >= requiredScore : conf >= 75;
     const autoReady =
       autoEngineRunning &&
@@ -1708,6 +1712,9 @@
       ['Vị thế mở', hasPosition ? 'CÓ' : 'KHÔNG', 'ENTRY'],
       ['Confidence', scoreText, 'CONFIDENCE'],
       ['Ngưỡng yêu cầu', requiredText, 'CONFIDENCE'],
+      ['Auto intent', hasNum(autoIntentScore) && autoIntentScore > 0 ? `${formatNum(autoIntentScore, 0)}/100` : 'N/A', 'CONFIDENCE'],
+      ['Auto win prob', hasNum(autoWinProbability) && autoWinProbability > 0 ? `${formatNum(autoWinProbability, 0)}%` : 'N/A', 'CONFIDENCE'],
+      ['Auto gate code', autoCode, 'SIDEWAY'],
       ['RR', hasNum(rr) ? formatNum(rr, 2) : 'N/A', 'RR'],
       [
         'Spread / Latency',
@@ -1783,6 +1790,17 @@
     } else if (!autoMode) explain.push('Đang không ở AUTO_BOT, bot chỉ phân tích/gợi ý.');
     else explain.push('AUTO đang bị chặn bởi một hoặc nhiều điều kiện risk/filter.');
     if (blockedReasons.length) explain.push(`Auto blocked: ${blockedReasons.join(' | ')}`);
+    if (autoDecision) {
+      if (Array.isArray(autoDecision?.rejectReasons) && autoDecision.rejectReasons.length) {
+        explain.push(`Auto gate reject: ${autoDecision.rejectReasons.slice(0, 3).join(' | ')}`);
+      }
+      if (Array.isArray(autoDecision?.intent?.strengths) && autoDecision.intent.strengths.length) {
+        explain.push(`Auto strengths: ${autoDecision.intent.strengths.slice(0, 3).join(' | ')}`);
+      }
+      if (Array.isArray(autoDecision?.intent?.warnings) && autoDecision.intent.warnings.length) {
+        explain.push(`Auto warnings: ${autoDecision.intent.warnings.slice(0, 3).join(' | ')}`);
+      }
+    }
     if (baseReasons.length) explain.push(`Lý do thuận: ${baseReasons.join(' | ')}`);
     if (baseRejects.length) explain.push(`Lý do chặn: ${baseRejects.join(' | ')}`);
     else if (baseDiagnostics.length) explain.push(`Chẩn đoán: ${baseDiagnostics.join(' | ')}`);

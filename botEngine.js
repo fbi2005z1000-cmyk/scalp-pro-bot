@@ -2,6 +2,7 @@
 const EventEmitter = require('events');
 const WebSocket = require('ws');
 const SignalEngine = require('./signalEngine');
+const { AutoTradeEngine } = require('./autoTrade');
 const { BOT_STATES } = require('./stateStore');
 const { formatTs, formatDateKey } = require('./utils');
 
@@ -27,6 +28,7 @@ class BotEngine {
     this.events = new EventEmitter();
 
     this.signalEngine = new SignalEngine(config, logger);
+    this.autoTradeEngine = new AutoTradeEngine({ config, logger, stateStore });
     this.rest = axios.create({
       baseURL: config.binance.restBaseUrl,
       timeout: 12000,
@@ -3967,7 +3969,32 @@ class BotEngine {
     }
 
     if (mode === 'AUTO_BOT') {
-      if (signal.confidence < this.config.trading.autoThreshold) return;
+      const spreadPct = Number(this.stateStore.state?.orderBook?.spreadPct || signal?.market?.spreadPct || 0);
+      const estimatedSlippagePct = this.estimateSlippage(signal);
+      const autoDecision = this.autoTradeEngine.evaluateSignal(signal, {
+        spreadPct,
+        estimatedSlippagePct,
+        latencyMs,
+      });
+      signal.autoDecision = autoDecision;
+      signal.requiredScore = Math.max(
+        Number(signal.requiredScore || 0),
+        Number(autoDecision?.thresholds?.minConfidence || 0),
+      );
+      if (!autoDecision.ok) {
+        this.emitLifecycle(
+          'RISK_ALERT',
+          {
+            ...signal,
+            timeframe: signal.signalTimeframe || this.config.timeframe.analysis || '3m',
+            reason: autoDecision.code || 'AUTO_GATE_BLOCK',
+            autoDecision,
+            source: 'AUTO_TRADE_ENGINE',
+          },
+          { dedupeMs: 1500 },
+        );
+        return;
+      }
 
       const execSim = this.simulateExecutionGate(signal);
       if (!execSim.ok) {
@@ -3987,7 +4014,7 @@ class BotEngine {
 
       const orderResult = await this.orderManager.placeMarketOrder(signal, {
         latencyMs,
-        estimatedSlippagePct: this.estimateSlippage(signal),
+        estimatedSlippagePct,
       });
 
       if (orderResult.ok) {
@@ -4327,6 +4354,10 @@ class BotEngine {
     const autoMode = mode === 'AUTO_BOT';
     const autoEngineRunning = autoMode && botRunning && allowAuto;
     const canPlaceRealOrder = autoEngineRunning && liveOrderEnabled;
+    const autoEngineStatus =
+      this.autoTradeEngine && typeof this.autoTradeEngine.getRuntimeStatus === 'function'
+        ? this.autoTradeEngine.getRuntimeStatus()
+        : null;
     const autoBlockedReasons = [];
     if (!autoMode) autoBlockedReasons.push('MODE_NOT_AUTO_BOT');
     if (!botRunning) autoBlockedReasons.push('BOT_STOPPED');
@@ -4337,6 +4368,9 @@ class BotEngine {
     if (baseStatus?.activePosition) autoBlockedReasons.push('HAS_OPEN_POSITION');
     if (String(baseStatus?.stateMachine || '').includes('PAUSED_BY_SIDEWAY')) {
       autoBlockedReasons.push('PAUSED_BY_SIDEWAY');
+    }
+    if (autoEngineStatus?.last && autoEngineStatus.last.ok === false && autoEngineStatus.last.code) {
+      autoBlockedReasons.push(`AUTO_GATE_${autoEngineStatus.last.code}`);
     }
 
     return {
@@ -4352,6 +4386,7 @@ class BotEngine {
         autoEngineRunning,
         canPlaceRealOrder,
         blockedReasons: autoBlockedReasons,
+        decision: autoEngineStatus,
       },
       advanced: this.config.advanced,
       positionSizing: this.config.positionSizing,

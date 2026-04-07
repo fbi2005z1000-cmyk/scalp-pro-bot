@@ -60,6 +60,22 @@ const parseSymbols = (symbols) => {
 };
 
 const configuredSpecialWatchSymbols = parseSymbolList(process.env.SPECIAL_WATCH_SYMBOLS, ['FIDAUSDT']);
+const configuredAutoHardRejectCodes = parseSymbolList(process.env.AUTO_HARD_REJECT_CODES, [
+  'NEAR_STRONG_RESISTANCE',
+  'NEAR_STRONG_SUPPORT',
+  'LOW_REWARD_DISTANCE',
+  'BAD_PULLBACK',
+  'WEAK_PULLBACK_STRUCTURE',
+  'BOS_AGAINST_TREND',
+  'PRICE_ACTION_BLOCK',
+  'CANDLE_CONFIRM_MISSING',
+  'HIGH_SPREAD',
+  'HIGH_LATENCY',
+  'HIGH_SLIPPAGE',
+  'LOW_MARKET_QUALITY',
+  'STRICT_QUALITY_GATE',
+  'FOMO_BREAKOUT',
+]);
 const configuredSymbols = Array.from(
   new Set([...parseSymbols(process.env.SYMBOLS), ...configuredSpecialWatchSymbols]),
 );
@@ -265,6 +281,14 @@ const config = {
     signalThreshold: toNumber(process.env.SIGNAL_THRESHOLD, 56),
     autoThreshold: toNumber(process.env.AUTO_THRESHOLD, 75),
     semiThreshold: toNumber(process.env.SEMI_THRESHOLD, 61),
+    autoMinConfidence: toNumber(process.env.AUTO_MIN_CONFIDENCE, 0),
+    autoMinIntentScore: toNumber(process.env.AUTO_MIN_INTENT_SCORE, 62),
+    autoMinWinProbability: toNumber(process.env.AUTO_MIN_WIN_PROBABILITY, 65),
+    autoLiquidityMinScore: toNumber(process.env.AUTO_LIQUIDITY_MIN_SCORE, 30),
+    autoDecisionCooldownMs: toNumber(process.env.AUTO_DECISION_COOLDOWN_MS, 12000),
+    autoRequireStrongLevel: process.env.AUTO_REQUIRE_STRONG_LEVEL !== 'false',
+    autoAllowWeakWhenConsensus: process.env.AUTO_ALLOW_WEAK_WHEN_CONSENSUS === 'true',
+    autoHardRejectCodes: configuredAutoHardRejectCodes,
     cooldownMinSec: toNumber(process.env.COOLDOWN_MIN_SEC, 30),
     cooldownMaxSec: toNumber(process.env.COOLDOWN_MAX_SEC, 120),
     signalDuplicateCooldownMs: toNumber(process.env.SIGNAL_DUPLICATE_COOLDOWN_MS, 22000),

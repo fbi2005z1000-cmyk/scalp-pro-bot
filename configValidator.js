@@ -22,6 +22,13 @@ function validateCoreConfig(config) {
   if (!inRange(t.signalThreshold, 0, 100)) errors.push('trading.signalThreshold phai trong [0,100]');
   if (!inRange(t.semiThreshold, 0, 100)) errors.push('trading.semiThreshold phai trong [0,100]');
   if (!inRange(t.autoThreshold, 0, 100)) errors.push('trading.autoThreshold phai trong [0,100]');
+  if (!inRange(t.autoMinConfidence, 0, 100)) errors.push('trading.autoMinConfidence phai trong [0,100]');
+  if (!inRange(t.autoMinIntentScore, 0, 100)) errors.push('trading.autoMinIntentScore phai trong [0,100]');
+  if (!inRange(t.autoMinWinProbability, 0, 100)) errors.push('trading.autoMinWinProbability phai trong [0,100]');
+  if (!inRange(t.autoLiquidityMinScore, 0, 100)) errors.push('trading.autoLiquidityMinScore phai trong [0,100]');
+  if (!Number.isFinite(t.autoDecisionCooldownMs) || t.autoDecisionCooldownMs < 1000) {
+    errors.push('trading.autoDecisionCooldownMs phai >= 1000');
+  }
   if (t.autoThreshold <= t.signalThreshold) {
     errors.push('AUTO_THRESHOLD phai lon hon SIGNAL_THRESHOLD');
   }
